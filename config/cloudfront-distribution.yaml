@@ -1,0 +1,90 @@
+version: 1
+distributions:
+  - id: scavenger-cdn
+    enabled: true
+    origins:
+      - domainName: scavenger-app.s3.amazonaws.com
+        id: s3-origin
+        s3OriginConfig:
+          originAccessIdentity: origin-access-identity/cloudfront/ABCDEFG1234567
+    defaultCacheBehavior:
+      allowedMethods:
+        - GET
+        - HEAD
+        - OPTIONS
+      cachedMethods:
+        - GET
+        - HEAD
+      compress: true
+      defaultTtl: 86400
+      maxTtl: 31536000
+      minTtl: 0
+      targetOriginId: s3-origin
+      viewerProtocolPolicy: redirect-to-https
+      forwardedValues:
+        queryString: false
+        cookies:
+          forward: none
+        headers:
+          - Accept
+          - Accept-Encoding
+    cacheBehaviors:
+      - pathPattern: /api/*
+        allowedMethods:
+          - GET
+          - HEAD
+          - OPTIONS
+          - PUT
+          - POST
+          - PATCH
+          - DELETE
+        cachedMethods:
+          - GET
+          - HEAD
+        compress: true
+        defaultTtl: 0
+        maxTtl: 0
+        minTtl: 0
+        targetOriginId: s3-origin
+        viewerProtocolPolicy: https-only
+        forwardedValues:
+          queryString: true
+          cookies:
+            forward: all
+      - pathPattern: /static/*
+        allowedMethods:
+          - GET
+          - HEAD
+        cachedMethods:
+          - GET
+          - HEAD
+        compress: true
+        defaultTtl: 31536000
+        maxTtl: 31536000
+        minTtl: 31536000
+        targetOriginId: s3-origin
+        viewerProtocolPolicy: https-only
+        forwardedValues:
+          queryString: false
+          cookies:
+            forward: none
+    enabled: true
+    httpVersion: http2and3
+    isIpv6Enabled: true
+    priceClass: PriceClass_100
+    viewerCertificate:
+      acmCertificateArn: arn:aws:acm:us-east-1:123456789012:certificate/12345678-1234-1234-1234-123456789012
+      minimumProtocolVersion: TLSv1.2_2021
+      sslSupportMethod: sni-only
+    aliases:
+      - scavenger.example.com
+      - www.scavenger.example.com
+    customErrorResponses:
+      - errorCode: 404
+        responseCode: 200
+        responsePagePath: /index.html
+        errorCachingMinTtl: 300
+      - errorCode: 403
+        responseCode: 200
+        responsePagePath: /index.html
+        errorCachingMinTtl: 300
