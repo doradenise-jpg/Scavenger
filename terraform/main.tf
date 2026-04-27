@@ -81,6 +81,16 @@ module "alb" {
   certificate_arn    = var.certificate_arn
 }
 
+# ECR Container Registry
+module "ecr" {
+  source = "./modules/ecr"
+
+  environment       = var.environment
+  ci_role_arn       = var.ci_role_arn
+  ecs_task_role_arn = var.ecs_task_role_arn
+  alerts_sns_arn    = var.alerts_sns_arn
+}
+
 # CloudWatch
 module "monitoring" {
   source = "./modules/monitoring"
@@ -89,6 +99,23 @@ module "monitoring" {
   alb_arn     = module.alb.arn
   ecs_cluster = module.ecs.cluster_name
   rds_id      = module.rds.db_instance_id
+}
+
+# Cost Optimization
+module "cost_optimization" {
+  source = "./modules/cost_optimization"
+
+  environment       = var.environment
+  aws_region        = var.aws_region
+  ecs_cluster_name  = module.ecs.cluster_name
+  ecs_service_name  = var.ecs_service_name
+  ecs_min_capacity  = var.ecs_min_capacity
+  ecs_max_capacity  = var.ecs_max_capacity
+  spot_asg_arn      = var.spot_asg_arn
+  monthly_budget_usd  = var.monthly_budget_usd
+  budget_alert_emails = var.budget_alert_emails
+  rds_instance_id     = module.rds.db_instance_id
+  scheduler_role_arn  = var.scheduler_role_arn
 }
 
 # Outputs

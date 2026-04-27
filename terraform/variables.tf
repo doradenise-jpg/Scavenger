@@ -100,3 +100,46 @@ variable "certificate_arn" {
   type        = string
   description = "ACM certificate ARN for HTTPS"
 }
+
+variable "ci_role_arn" {
+  type        = string
+  description = "IAM role ARN for CI/CD image push"
+}
+
+variable "ecs_task_role_arn" {
+  type        = string
+  description = "IAM role ARN for ECS task image pull"
+}
+
+variable "alerts_sns_arn" {
+  type        = string
+  description = "SNS topic ARN for infrastructure alerts"
+}
+
+variable "ecs_service_name" {
+  type        = string
+  description = "ECS service name"
+  default     = "scavenger-backend"
+}
+
+variable "spot_asg_arn" {
+  type        = string
+  description = "ARN of the Spot Auto Scaling Group for ECS"
+}
+
+variable "monthly_budget_usd" {
+  type        = string
+  default     = "200"
+  description = "Monthly AWS budget limit in USD"
+}
+
+variable "budget_alert_emails" {
+  type        = list(string)
+  description = "Email addresses for budget alerts"
+  default     = []
+}
+
+variable "scheduler_role_arn" {
+  type        = string
+  description = "IAM role ARN for EventBridge scheduler (RDS auto-stop)"
+}
