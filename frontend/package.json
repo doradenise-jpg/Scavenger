@@ -15,6 +15,8 @@
     "e2e": "playwright test",
     "e2e:ui": "playwright test --ui",
     "e2e:debug": "playwright test --debug",
+    "smoke": "SMOKE=1 playwright test --project=smoke",
+    "smoke:ci": "SMOKE=1 playwright test --project=smoke --reporter=list,html",
     "a11y": "playwright test --grep 'Accessibility|Keyboard Navigation'",
     "a11y:ui": "playwright test --grep 'Accessibility|Keyboard Navigation' --ui",
     "visual": "playwright test --project=visual-chromium --project=visual-firefox --project=visual-mobile",

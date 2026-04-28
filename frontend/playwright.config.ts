@@ -1,5 +1,11 @@
 import { defineConfig, devices } from '@playwright/test';
 
+const isSmoke = process.env.SMOKE === '1';
+// Smoke tests run against a live deployment; all other tests use the dev server.
+const baseURL = isSmoke
+  ? (process.env.PLAYWRIGHT_BASE_URL ?? process.env.BASE_URL ?? 'http://localhost:5173')
+  : 'http://localhost:5173';
+
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: true,
@@ -11,7 +17,7 @@ export default defineConfig({
     ['json', { outputFile: 'playwright-report/results.json' }],
   ],
   use: {
-    baseURL: 'http://localhost:5173',
+    baseURL,
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
   },

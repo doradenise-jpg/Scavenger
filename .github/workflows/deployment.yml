@@ -62,15 +62,19 @@ jobs:
           echo "Deploying to staging environment..."
           # Add deployment commands here
 
-      - name: Run smoke tests
-        run: |
-          echo "Running smoke tests..."
-          # Add smoke test commands
-
       - name: Notify deployment
         if: success()
         run: |
           echo "Deployment to staging successful"
+
+  smoke-staging:
+    name: Smoke Tests (Staging)
+    needs: deploy-staging
+    uses: ./.github/workflows/smoke-tests.yml
+    with:
+      base_url: 'https://staging.scavenger.app'
+    secrets:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 
   deploy-production:
     name: Deploy to Production
@@ -106,6 +110,15 @@ jobs:
         run: |
           echo "Verifying production deployment..."
           # Add verification commands
+
+  smoke-production:
+    name: Smoke Tests (Production)
+    needs: deploy-production
+    uses: ./.github/workflows/smoke-tests.yml
+    with:
+      base_url: 'https://scavenger.app'
+    secrets:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 
   rollback:
     name: Rollback Deployment
