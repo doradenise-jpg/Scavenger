@@ -8,7 +8,7 @@ mod validation;
 
 pub use errors::Error;
 pub use types::{
-    Challenge, ChallengeProgress, ChallengeStatus, CertificationLevel, GlobalMetrics, GradeRecord, Auction, Incentive,
+    CarbonListing, Challenge, ChallengeProgress, ChallengeStatus, CertificationLevel, GlobalMetrics, GradeRecord, Auction, Incentive,
     LeaderboardEntry, Material, Milestone, ParticipantRole, PendingTransfer,
     PendingTransferStatus, ProcessingRecord, ProcessingStatus, RecyclingStats, SeasonalMultiplier,
     TransferItemType, TransferRecord, TransferStatus, Waste, WasteGrade, WasteTransfer, WasteType,
@@ -42,6 +42,10 @@ const AUCTION_COUNT: Symbol = symbol_short!("AUC_CNT");
 const SEASONAL_MUL: Symbol = symbol_short!("SEAS_MUL");
 const TOTAL_CARBON: Symbol = symbol_short!("TOT_CARB");
 const CONTAMINATED_LIST: Symbol = symbol_short!("CONT_LST");
+
+// Carbon credit marketplace counter and active-listing index
+const CARB_LIST_CNT: Symbol = symbol_short!("CARB_CNT");
+const CARB_LIST_IDX: Symbol = symbol_short!("CARB_IDX");
 
 // Reputation delta constants
 const REP_TRANSFER: i128 = 5;
@@ -3210,6 +3214,300 @@ impl ScavengerContract {
     pub fn get_participant_carbon_credits(env: Env, participant: Address) -> u128 {
         let stats: Option<RecyclingStats> = env.storage().instance().get(&("stats", participant));
         stats.map(|s| s.carbon_credits_earned).unwrap_or(0)
+    }
+
+    // ========== Carbon Credit Redemption & Marketplace ==========
+
+    /// Redeem (burn) a portion of a participant's earned carbon credits.
+    ///
+    /// Decrements the participant's `RecyclingStats.carbon_credits_earned` by
+    /// `amount` and emits a `carb_rdm` event. Returns the remaining balance.
+    ///
+    /// # Errors
+    /// - `InvalidAmount` if `amount == 0`.
+    /// - `InsufficientCarbonCredits` if the balance is below `amount`.
+    /// - `NotRegistered` if the participant has no recycling stats yet.
+    pub fn redeem_carbon_credits(
+        env: Env,
+        participant: Address,
+        amount: u128,
+    ) -> Result<u128, Error> {
+        Self::require_not_paused(&env);
+        participant.require_auth();
+
+        if amount == 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let mut stats: RecyclingStats = env
+            .storage()
+            .instance()
+            .get(&("stats", participant.clone()))
+            .ok_or(Error::NotRegistered)?;
+
+        if stats.carbon_credits_earned < amount {
+            return Err(Error::InsufficientCarbonCredits);
+        }
+
+        stats.carbon_credits_earned -= amount;
+        let remaining = stats.carbon_credits_earned;
+        env.storage()
+            .instance()
+            .set(&("stats", participant.clone()), &stats);
+
+        events::emit_carbon_credits_redeemed(&env, &participant, amount, remaining);
+        Ok(remaining)
+    }
+
+    /// List a quantity of carbon credits for sale on the marketplace.
+    ///
+    /// The credits are escrowed: `amount` is subtracted from the seller's
+    /// `RecyclingStats.carbon_credits_earned` and stored on the listing until
+    /// it is cancelled or purchased.
+    ///
+    /// # Errors
+    /// - `InvalidListing` if `amount == 0` or `price_per_credit <= 0`.
+    /// - `NotRegistered` if the seller has no recycling stats.
+    /// - `InsufficientCarbonCredits` if the seller's balance is below `amount`.
+    pub fn create_carbon_listing(
+        env: Env,
+        seller: Address,
+        amount: u128,
+        price_per_credit: i128,
+    ) -> Result<u64, Error> {
+        Self::require_not_paused(&env);
+        seller.require_auth();
+
+        if amount == 0 || price_per_credit <= 0 {
+            return Err(Error::InvalidListing);
+        }
+
+        let mut stats: RecyclingStats = env
+            .storage()
+            .instance()
+            .get(&("stats", seller.clone()))
+            .ok_or(Error::NotRegistered)?;
+
+        if stats.carbon_credits_earned < amount {
+            return Err(Error::InsufficientCarbonCredits);
+        }
+
+        // Escrow: subtract from seller stats
+        stats.carbon_credits_earned -= amount;
+        env.storage()
+            .instance()
+            .set(&("stats", seller.clone()), &stats);
+
+        // Mint new listing id
+        let id: u64 = env
+            .storage()
+            .instance()
+            .get(&CARB_LIST_CNT)
+            .unwrap_or(0u64)
+            + 1;
+        env.storage().instance().set(&CARB_LIST_CNT, &id);
+
+        let listing = CarbonListing {
+            id,
+            seller: seller.clone(),
+            amount,
+            price_per_credit,
+            is_active: true,
+            created_at: env.ledger().timestamp(),
+        };
+        env.storage()
+            .instance()
+            .set(&("carb_list", id), &listing);
+
+        // Append to active-listing index
+        let mut idx: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&CARB_LIST_IDX)
+            .unwrap_or(Vec::new(&env));
+        idx.push_back(id);
+        env.storage().instance().set(&CARB_LIST_IDX, &idx);
+
+        events::emit_carbon_listing_created(&env, id, &seller, amount, price_per_credit);
+        Ok(id)
+    }
+
+    /// Cancel an active carbon-credit listing and return the escrowed credits
+    /// to the seller's `RecyclingStats.carbon_credits_earned`.
+    ///
+    /// # Errors
+    /// - `CarbonListingNotFound` if no listing exists for `listing_id`.
+    /// - `CarbonListingInactive` if the listing is already cancelled or purchased.
+    /// - `NotListingSeller` if the caller is not the seller.
+    pub fn cancel_carbon_listing(
+        env: Env,
+        listing_id: u64,
+        seller: Address,
+    ) -> Result<(), Error> {
+        Self::require_not_paused(&env);
+        seller.require_auth();
+
+        let mut listing: CarbonListing = env
+            .storage()
+            .instance()
+            .get(&("carb_list", listing_id))
+            .ok_or(Error::CarbonListingNotFound)?;
+
+        if !listing.is_active {
+            return Err(Error::CarbonListingInactive);
+        }
+        if listing.seller != seller {
+            return Err(Error::NotListingSeller);
+        }
+
+        // Return escrowed credits to seller
+        let mut stats: RecyclingStats = env
+            .storage()
+            .instance()
+            .get(&("stats", seller.clone()))
+            .unwrap_or_else(|| RecyclingStats::new(seller.clone()));
+        stats.carbon_credits_earned = stats
+            .carbon_credits_earned
+            .checked_add(listing.amount)
+            .ok_or(Error::Overflow)?;
+        env.storage()
+            .instance()
+            .set(&("stats", seller.clone()), &stats);
+
+        listing.is_active = false;
+        env.storage()
+            .instance()
+            .set(&("carb_list", listing_id), &listing);
+
+        Self::remove_active_listing(&env, listing_id);
+
+        events::emit_carbon_listing_cancelled(&env, listing_id, &seller);
+        Ok(())
+    }
+
+    /// Purchase an active carbon-credit listing.
+    ///
+    /// Transfers `listing.amount * listing.price_per_credit` tokens from the
+    /// buyer to the seller via the configured token contract, then credits
+    /// the buyer's `RecyclingStats.carbon_credits_earned` with `listing.amount`.
+    ///
+    /// # Errors
+    /// - `CarbonListingNotFound`, `CarbonListingInactive`.
+    /// - `InvalidListing` if the buyer is the seller.
+    /// - `TokenAddressNotSet` if no token contract has been configured.
+    /// - `Overflow` on arithmetic overflow.
+    pub fn purchase_carbon_listing(
+        env: Env,
+        listing_id: u64,
+        buyer: Address,
+    ) -> Result<(), Error> {
+        Self::require_not_paused(&env);
+        buyer.require_auth();
+
+        let mut listing: CarbonListing = env
+            .storage()
+            .instance()
+            .get(&("carb_list", listing_id))
+            .ok_or(Error::CarbonListingNotFound)?;
+
+        if !listing.is_active {
+            return Err(Error::CarbonListingInactive);
+        }
+        if listing.seller == buyer {
+            return Err(Error::InvalidListing);
+        }
+
+        let token_address: Address = env
+            .storage()
+            .instance()
+            .get(&TOKEN_ADDR)
+            .ok_or(Error::TokenAddressNotSet)?;
+
+        let total_price_u128 = listing
+            .amount
+            .checked_mul(listing.price_per_credit as u128)
+            .ok_or(Error::Overflow)?;
+        if total_price_u128 > i128::MAX as u128 {
+            return Err(Error::Overflow);
+        }
+        let total_price = total_price_u128 as i128;
+
+        // Pay seller in tokens
+        let token_client = token::Client::new(&env, &token_address);
+        token_client.transfer(&buyer, &listing.seller, &total_price);
+
+        // Credit buyer's carbon credits
+        let mut buyer_stats: RecyclingStats = env
+            .storage()
+            .instance()
+            .get(&("stats", buyer.clone()))
+            .unwrap_or_else(|| RecyclingStats::new(buyer.clone()));
+        buyer_stats.carbon_credits_earned = buyer_stats
+            .carbon_credits_earned
+            .checked_add(listing.amount)
+            .ok_or(Error::Overflow)?;
+        env.storage()
+            .instance()
+            .set(&("stats", buyer.clone()), &buyer_stats);
+
+        listing.is_active = false;
+        env.storage()
+            .instance()
+            .set(&("carb_list", listing_id), &listing);
+
+        Self::remove_active_listing(&env, listing_id);
+
+        events::emit_carbon_listing_purchased(
+            &env,
+            listing_id,
+            &listing.seller,
+            &buyer,
+            listing.amount,
+            total_price,
+        );
+        Ok(())
+    }
+
+    /// Get a carbon-credit listing by id.
+    pub fn get_carbon_listing(env: Env, listing_id: u64) -> Option<CarbonListing> {
+        env.storage().instance().get(&("carb_list", listing_id))
+    }
+
+    /// Get all currently-active carbon-credit listings.
+    pub fn get_active_carbon_listings(env: Env) -> Vec<CarbonListing> {
+        let idx: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&CARB_LIST_IDX)
+            .unwrap_or(Vec::new(&env));
+        let mut out: Vec<CarbonListing> = Vec::new(&env);
+        for id in idx.iter() {
+            if let Some(l) = env
+                .storage()
+                .instance()
+                .get::<_, CarbonListing>(&("carb_list", id))
+            {
+                if l.is_active {
+                    out.push_back(l);
+                }
+            }
+        }
+        out
+    }
+
+    fn remove_active_listing(env: &Env, listing_id: u64) {
+        let idx: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&CARB_LIST_IDX)
+            .unwrap_or(Vec::new(env));
+        let mut new_idx: Vec<u64> = Vec::new(env);
+        for id in idx.iter() {
+            if id != listing_id {
+                new_idx.push_back(id);
+            }
+        }
+        env.storage().instance().set(&CARB_LIST_IDX, &new_idx);
     }
 
     /// Mark a v2 waste item as contaminated.

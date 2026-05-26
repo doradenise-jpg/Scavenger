@@ -933,6 +933,24 @@ impl Auction {
     }
 }
 
+/// A listing of carbon credits offered for sale on the marketplace.
+///
+/// Credits listed here are escrowed: they are subtracted from the seller's
+/// `RecyclingStats.carbon_credits_earned` when the listing is created and
+/// returned (on cancel) or transferred to the buyer (on purchase).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CarbonListing {
+    pub id: u64,
+    pub seller: Address,
+    /// Amount of carbon credits (grams of CO2 equivalent) on offer.
+    pub amount: u128,
+    /// Price per credit in the smallest token unit of the configured token.
+    pub price_per_credit: i128,
+    pub is_active: bool,
+    pub created_at: u64,
+}
+
 /// Transfer record for waste movement across the supply chain.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]

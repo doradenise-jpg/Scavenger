@@ -218,3 +218,41 @@ pub fn emit_goal_achieved(env: &Env, participant: &Address, target_weight: u128)
     env.events()
         .publish((symbol_short!("goal_ach"), participant), target_weight);
 }
+
+pub fn emit_carbon_credits_redeemed(
+    env: &Env,
+    participant: &Address,
+    amount: u128,
+    remaining: u128,
+) {
+    env.events()
+        .publish((symbol_short!("carb_rdm"), participant), (amount, remaining));
+}
+
+pub fn emit_carbon_listing_created(
+    env: &Env,
+    listing_id: u64,
+    seller: &Address,
+    amount: u128,
+    price_per_credit: i128,
+) {
+    env.events()
+        .publish((symbol_short!("carb_lst"), listing_id), (seller, amount, price_per_credit));
+}
+
+pub fn emit_carbon_listing_cancelled(env: &Env, listing_id: u64, seller: &Address) {
+    env.events()
+        .publish((symbol_short!("carb_cnc"), listing_id), seller);
+}
+
+pub fn emit_carbon_listing_purchased(
+    env: &Env,
+    listing_id: u64,
+    seller: &Address,
+    buyer: &Address,
+    amount: u128,
+    total_price: i128,
+) {
+    env.events()
+        .publish((symbol_short!("carb_buy"), listing_id), (seller, buyer, amount, total_price));
+}

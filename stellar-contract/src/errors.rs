@@ -210,4 +210,24 @@ pub enum Error {
     /// (44) The waste item has expired (TTL elapsed).
     /// Returned by: `transfer_waste_v2`, `batch_transfer_waste`
     WasteExpired = 44,
+
+    /// (45) The participant does not have enough carbon credits for the requested operation.
+    /// Returned by: `redeem_carbon_credits`, `create_carbon_listing`
+    InsufficientCarbonCredits = 45,
+
+    /// (46) No carbon listing exists for the given ID.
+    /// Returned by: `cancel_carbon_listing`, `purchase_carbon_listing`
+    CarbonListingNotFound = 46,
+
+    /// (47) The carbon listing is not active (already cancelled or purchased).
+    /// Returned by: `cancel_carbon_listing`, `purchase_carbon_listing`
+    CarbonListingInactive = 47,
+
+    /// (48) The caller is not the seller of the carbon listing.
+    /// Returned by: `cancel_carbon_listing`
+    NotListingSeller = 48,
+
+    /// (49) Listing amount or price is zero, or buyer equals seller.
+    /// Returned by: `create_carbon_listing`, `purchase_carbon_listing`
+    InvalidListing = 49,
 }
