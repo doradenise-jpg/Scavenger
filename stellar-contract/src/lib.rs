@@ -8,10 +8,12 @@ mod validation;
 
 pub use errors::Error;
 pub use types::{
-    CarbonListing, Challenge, ChallengeProgress, ChallengeStatus, CertificationLevel, GlobalMetrics, GradeRecord, Auction, Incentive,
-    LeaderboardEntry, Material, Milestone, ParticipantRole, PendingTransfer,
-    PendingTransferStatus, ProcessingRecord, ProcessingStatus, RecyclingStats, SeasonalMultiplier,
-    TransferItemType, TransferRecord, TransferStatus, Waste, WasteGrade, WasteTransfer, WasteType,
+    Auction, CarbonListing, CertificationLevel, Challenge, ChallengeProgress, ChallengeStatus,
+    ContaminationReport, GlobalMetrics, GradeRecord, Incentive, LeaderboardEntry, Material,
+    MaterialComposition, Milestone, OptionalWasteType, ParticipantRole, PendingTransfer,
+    PendingTransferStatus, ProcessingRecord, ProcessingStatus, RecyclingGoal, RecyclingStats,
+    SeasonalMultiplier, TransferItemType, TransferRecord, TransferStatus, Waste, WasteGrade,
+    WasteTransfer, WasteType,
 };
 pub use types::calculate_carbon_credits;
 
@@ -1403,8 +1405,8 @@ impl ScavengerContract {
     /// # Errors
     /// - Panics if caller is not admin
     /// - Panics if participant not found
-    pub fn grant_certification(env: Env, address: Address, level: CertificationLevel) {
-        Self::require_admin(&env);
+    pub fn grant_certification(env: Env, admin: Address, address: Address, level: CertificationLevel) {
+        Self::require_admin(&env, &admin);
 
         let key = (address.clone(),);
         if let Some(mut participant) = env.storage().instance().get::<_, Participant>(&key) {
@@ -1428,7 +1430,7 @@ impl ScavengerContract {
     ///
     /// # Returns
     /// Vector of participant addresses with the specified certification level
-    pub fn get_participants_by_certification(env: Env, level: CertificationLevel) -> Vec<Address> {
+    pub fn get_participants_by_cert(env: Env, level: CertificationLevel) -> Vec<Address> {
         let participant_index: Vec<Address> = env
             .storage()
             .instance()
@@ -1461,7 +1463,8 @@ impl ScavengerContract {
     /// # Errors
     /// - Panics if waste not found or not owned by caller
     /// - Panics if duration invalid
-    pub fn create_auction(env: Env, waste_id: u128, start_price: u128, duration: u64) -> u64 {
+    pub fn create_auction(env: Env, creator: Address, waste_id: u128, start_price: u128, duration: u64) -> u64 {
+        creator.require_auth();
         Self::require_not_paused(&env);
 
         // Validate duration
@@ -1469,15 +1472,13 @@ impl ScavengerContract {
             panic!("Invalid auction duration");
         }
 
-        // Get waste and check ownership
-        let waste = Self::get_waste_by_id(env.clone(), waste_id as u64)
-            .expect("Waste not found");
-        if waste.current_owner != env.invoker() {
+        // Get v2 waste and check ownership
+        let mut waste: types::Waste = env.storage().instance().get(&("waste_v2", waste_id)).expect("Waste not found");
+        if waste.current_owner != creator {
             panic!("Not waste owner");
         }
 
         // Transfer waste to contract for auction
-        let mut waste: types::Waste = env.storage().instance().get(&("waste_v2", waste_id)).expect("Waste not found");
         waste.current_owner = env.current_contract_address();
         env.storage().instance().set(&("waste_v2", waste_id), &waste);
 
@@ -1486,12 +1487,12 @@ impl ScavengerContract {
         env.storage().instance().set(&AUCTION_COUNT, &auction_id);
 
         // Create auction
-        let auction = Auction::new(&env, auction_id, waste_id, env.invoker(), start_price, duration);
+        let auction = Auction::new(&env, auction_id, waste_id, creator.clone(), start_price, duration);
         let key = ("auction", auction_id);
         env.storage().instance().set(&key, &auction);
 
         // Emit event
-        events::emit_auction_created(&env, auction_id, waste_id, &env.invoker(), start_price, auction.end_time);
+        events::emit_auction_created(&env, auction_id, waste_id, &creator, start_price, auction.end_time);
 
         auction_id
     }
@@ -1505,9 +1506,9 @@ impl ScavengerContract {
     /// # Errors
     /// - Panics if auction not found or ended
     /// - Panics if bid too low
-    pub fn place_bid(env: Env, auction_id: u64, amount: u128) {
+    pub fn place_bid(env: Env, bidder: Address, auction_id: u64, amount: u128) {
+        bidder.require_auth();
         Self::require_not_paused(&env);
-        env.invoker().require_auth();
 
         let key = ("auction", auction_id);
         let mut auction: Auction = env.storage().instance().get(&key).expect("Auction not found");
@@ -1520,14 +1521,11 @@ impl ScavengerContract {
             panic!("Bid too low");
         }
 
-        // Transfer tokens from bidder to contract (assuming token contract)
-        // For simplicity, assume tokens are handled externally or use internal balance
-
-        auction.place_bid(env.invoker(), amount);
+        auction.place_bid(bidder.clone(), amount);
         env.storage().instance().set(&key, &auction);
 
         // Emit event
-        events::emit_bid_placed(&env, auction_id, &env.invoker(), amount);
+        events::emit_bid_placed(&env, auction_id, &bidder, amount);
     }
 
     /// End an auction and transfer waste to winner
@@ -1568,14 +1566,14 @@ impl ScavengerContract {
     ///
     /// # Errors
     /// - Panics if not owner or auction has bids
-    pub fn cancel_auction(env: Env, auction_id: u64) {
+    pub fn cancel_auction(env: Env, caller: Address, auction_id: u64) {
+        caller.require_auth();
         Self::require_not_paused(&env);
-        env.invoker().require_auth();
 
         let key = ("auction", auction_id);
         let auction: Auction = env.storage().instance().get(&key).expect("Auction not found");
 
-        if auction.creator != env.invoker() {
+        if auction.creator != caller {
             panic!("Not auction creator");
         }
 
@@ -1625,8 +1623,8 @@ impl ScavengerContract {
     /// # Errors
     /// - Panics if not admin
     /// - Panics if batch too large
-    pub fn bulk_import_wastes(env: Env, wastes: soroban_sdk::Vec<types::Waste>) {
-        Self::require_admin(&env);
+    pub fn bulk_import_wastes(env: Env, admin: Address, wastes: soroban_sdk::Vec<types::Waste>) {
+        Self::require_admin(&env, &admin);
 
         if wastes.len() > 100 {
             panic!("Batch too large");
@@ -1658,8 +1656,8 @@ impl ScavengerContract {
     /// # Errors
     /// - Panics if not admin
     /// - Panics if batch too large
-    pub fn bulk_import_participants(env: Env, participants: soroban_sdk::Vec<Participant>) {
-        Self::require_admin(&env);
+    pub fn bulk_import_participants(env: Env, admin: Address, participants: soroban_sdk::Vec<Participant>) {
+        Self::require_admin(&env, &admin);
 
         if participants.len() > 100 {
             panic!("Batch too large");
@@ -2239,7 +2237,7 @@ impl ScavengerContract {
                 if goal.achieved {
                     continue;
                 }
-                let type_matches = goal.waste_type.map_or(true, |t| t == waste.waste_type);
+                let type_matches = goal.waste_type.matches(waste.waste_type);
                 if type_matches {
                     goal.current_weight = goal.current_weight.saturating_add(waste.weight);
                     if goal.current_weight >= goal.target_weight {
@@ -3575,6 +3573,174 @@ impl ScavengerContract {
             .instance()
             .get(&CONTAMINATED_LIST)
             .unwrap_or(Vec::new(&env))
+    }
+
+    // ========== Contamination Scoring & Reporting Workflow ==========
+
+    /// Compute an effective contamination score (0–100) for a v2 waste item.
+    ///
+    /// The score equals the raw `contamination_level`, with a 10-point penalty
+    /// added for grade-D waste (poor quality), capped at 100.
+    /// Returns 0 when the waste has not been marked as contaminated.
+    ///
+    /// # Errors
+    /// Panics if the waste ID does not exist.
+    pub fn get_contamination_score(env: Env, waste_id: u128) -> u32 {
+        let waste: types::Waste = env
+            .storage()
+            .instance()
+            .get(&("waste_v2", waste_id))
+            .expect("Waste not found");
+
+        if !waste.is_contaminated {
+            return 0;
+        }
+
+        let grade_penalty = if waste.grade == WasteGrade::D { 10u32 } else { 0u32 };
+        waste.contamination_level.saturating_add(grade_penalty).min(100)
+    }
+
+    /// Submit a contamination report for a v2 waste item.
+    ///
+    /// Any registered participant may report contamination. The report is stored
+    /// under the waste item's report list. When a waste accumulates 3 or more
+    /// reports, it is automatically marked as contaminated at the median reported
+    /// level and added to the global contaminated-waste list.
+    ///
+    /// # Parameters
+    /// - `waste_id`: ID of the v2 waste to report.
+    /// - `reporter`: Address of the participant submitting the report. Must sign.
+    /// - `level`: Contamination level (0–100).
+    /// - `reason`: Human-readable reason (max 200 chars).
+    ///
+    /// # Errors
+    /// - Panics if the waste does not exist.
+    /// - Panics if `level > 100`.
+    /// - Panics if `reporter` is not a registered participant.
+    pub fn report_contamination(
+        env: Env,
+        waste_id: u128,
+        reporter: Address,
+        level: u32,
+        reason: String,
+    ) -> types::ContaminationReport {
+        reporter.require_auth();
+        Self::require_not_paused(&env);
+
+        assert!(level <= 100, "Contamination level must be 0-100");
+        assert!(reason.len() <= 200, "Reason exceeds 200 characters");
+
+        // Reporter must be registered
+        let _participant: Participant = env
+            .storage()
+            .instance()
+            .get(&(reporter.clone(),))
+            .expect("Reporter not registered");
+
+        // Waste must exist
+        let _waste: types::Waste = env
+            .storage()
+            .instance()
+            .get(&("waste_v2", waste_id))
+            .expect("Waste not found");
+
+        let report = types::ContaminationReport {
+            waste_id,
+            reporter: reporter.clone(),
+            level,
+            reason,
+            reported_at: env.ledger().timestamp(),
+        };
+
+        // Append report to the list for this waste item
+        let reports_key = ("contamination_reports", waste_id);
+        let mut reports: Vec<types::ContaminationReport> = env
+            .storage()
+            .instance()
+            .get(&reports_key)
+            .unwrap_or(Vec::new(&env));
+        reports.push_back(report.clone());
+        env.storage().instance().set(&reports_key, &reports);
+
+        // Auto-mark contaminated when 3+ reports received (median level)
+        if reports.len() >= 3 {
+            let mut levels: Vec<u32> = Vec::new(&env);
+            for r in reports.iter() {
+                levels.push_back(r.level);
+            }
+            // Simple sort via selection sort (no std sort in no_std)
+            let n = levels.len();
+            for i in 0..n {
+                let mut min_idx = i;
+                for j in (i + 1)..n {
+                    if levels.get(j).unwrap() < levels.get(min_idx).unwrap() {
+                        min_idx = j;
+                    }
+                }
+                if min_idx != i {
+                    let tmp = levels.get(i).unwrap();
+                    levels.set(i, levels.get(min_idx).unwrap());
+                    levels.set(min_idx, tmp);
+                }
+            }
+            let median = levels.get(n / 2).unwrap();
+
+            let mut waste: types::Waste = env
+                .storage()
+                .instance()
+                .get(&("waste_v2", waste_id))
+                .unwrap();
+            if !waste.is_contaminated {
+                waste.is_contaminated = true;
+                waste.contamination_level = median;
+                waste.contamination_reason = report.reason.clone();
+                env.storage().instance().set(&("waste_v2", waste_id), &waste);
+
+                let mut list: Vec<u128> = env
+                    .storage()
+                    .instance()
+                    .get(&CONTAMINATED_LIST)
+                    .unwrap_or(Vec::new(&env));
+                if !list.contains(&waste_id) {
+                    list.push_back(waste_id);
+                    env.storage().instance().set(&CONTAMINATED_LIST, &list);
+                }
+
+                events::emit_waste_contaminated(&env, waste_id, &reporter, median);
+            }
+        }
+
+        report
+    }
+
+    /// Return all contamination reports for a v2 waste item.
+    pub fn get_contamination_reports(env: Env, waste_id: u128) -> Vec<types::ContaminationReport> {
+        env.storage()
+            .instance()
+            .get(&("contamination_reports", waste_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    // ========== Batch Submit / Verify aliases ==========
+
+    /// Batch-submit multiple materials in a single call.
+    /// Alias for [`submit_materials_batch`] with the name from issue #548.
+    pub fn batch_submit_materials(
+        env: Env,
+        materials: soroban_sdk::Vec<(WasteType, u64, String)>,
+        submitter: Address,
+    ) -> soroban_sdk::Vec<Material> {
+        Self::submit_materials_batch(env, materials, submitter)
+    }
+
+    /// Batch-verify multiple materials in a single call.
+    /// Alias for [`verify_materials_batch`] with the name from issue #548.
+    pub fn batch_verify_materials(
+        env: Env,
+        material_ids: soroban_sdk::Vec<u64>,
+        verifier: Address,
+    ) -> soroban_sdk::Vec<Material> {
+        Self::verify_materials_batch(env, material_ids, verifier)
     }
 
     /// Get global supply-chain statistics.
@@ -5889,7 +6055,7 @@ impl ScavengerContract {
         participant: Address,
         target_weight: u128,
         target_date: u64,
-        waste_type: Option<WasteType>,
+        waste_type: OptionalWasteType,
     ) -> Result<(), Error> {
         participant.require_auth();
         Self::require_not_paused(&env);

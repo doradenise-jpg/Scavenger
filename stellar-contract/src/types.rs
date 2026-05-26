@@ -671,6 +671,52 @@ pub struct MaterialComposition {
     pub percentage: u32,
 }
 
+/// A single contamination report submitted by a participant for a waste item.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContaminationReport {
+    /// ID of the waste item being reported
+    pub waste_id: u128,
+    /// Address of the participant who submitted the report
+    pub reporter: Address,
+    /// Contamination level 0-100 as assessed by the reporter
+    pub level: u32,
+    /// Human-readable reason for the report
+    pub reason: String,
+    /// Ledger timestamp when the report was submitted
+    pub reported_at: u64,
+}
+
+/// Soroban-compatible optional WasteType (Option<WasteType> cannot be used directly in contracttype).
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OptionalWasteType {
+    None = 0,
+    Paper = 1,
+    PetPlastic = 2,
+    Plastic = 3,
+    Metal = 4,
+    Glass = 5,
+    Organic = 6,
+    Electronic = 7,
+}
+
+impl OptionalWasteType {
+    /// Returns true if this matches any waste type, or the specific type given.
+    pub fn matches(&self, wt: WasteType) -> bool {
+        match self {
+            OptionalWasteType::None => true,
+            OptionalWasteType::Paper => wt == WasteType::Paper,
+            OptionalWasteType::PetPlastic => wt == WasteType::PetPlastic,
+            OptionalWasteType::Plastic => wt == WasteType::Plastic,
+            OptionalWasteType::Metal => wt == WasteType::Metal,
+            OptionalWasteType::Glass => wt == WasteType::Glass,
+            OptionalWasteType::Organic => wt == WasteType::Organic,
+            OptionalWasteType::Electronic => wt == WasteType::Electronic,
+        }
+    }
+}
+
 /// Represents a participant's recycling goal
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -680,7 +726,7 @@ pub struct RecyclingGoal {
     /// Target completion timestamp (Unix seconds)
     pub target_date: u64,
     /// Waste type this goal applies to (None = any type)
-    pub waste_type: Option<WasteType>,
+    pub waste_type: OptionalWasteType,
     /// Weight already recycled toward this goal
     pub current_weight: u128,
     /// Whether this goal has been achieved
@@ -740,6 +786,10 @@ pub struct Waste {
     pub processing_history: soroban_sdk::Vec<ProcessingRecord>,
     /// Unique tracking code for QR codes
     pub tracking_code: soroban_sdk::String,
+    /// Processing cost in tokens (set by owner)
+    pub processing_cost: u128,
+    /// Material composition breakdown (percentages summing to 100)
+    pub composition: soroban_sdk::Vec<MaterialComposition>,
 }
 
 impl Waste {
@@ -767,9 +817,7 @@ impl Waste {
         let mut history = soroban_sdk::Vec::new(env);
         history.push_back(initial_record);
 
-        // Generate tracking code: WS-{waste_id}-{checksum}
-        let checksum = (waste_id % 10000) as u32;
-        let tracking_code = soroban_sdk::String::from_str(env, &format!("WS-{:09}-{:04}", waste_id, checksum));
+        let tracking_code = soroban_sdk::String::from_str(env, "WS-TRACK");
 
         Self {
             waste_id,
@@ -795,6 +843,8 @@ impl Waste {
             processing_status: ProcessingStatus::Collected,
             processing_history: history,
             tracking_code,
+            processing_cost: 0,
+            composition: soroban_sdk::Vec::new(env),
         }
     }
     pub fn is_expired(&self, now: u64) -> bool {
@@ -1098,6 +1148,7 @@ impl WasteBuilder {
             contamination_reason: soroban_sdk::String::from_str(env, ""),
             processing_status: ProcessingStatus::Collected,
             processing_history: history,
+            tracking_code: soroban_sdk::String::from_str(env, "WS-TRACK"),
             processing_cost: 0,
             composition: soroban_sdk::Vec::new(env),
         }
