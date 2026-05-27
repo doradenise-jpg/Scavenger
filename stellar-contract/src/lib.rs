@@ -11,11 +11,11 @@ mod validation;
 pub use errors::Error;
 pub use types::{
     Auction, CarbonListing, CertificationLevel, Challenge, ChallengeProgress, ChallengeStatus,
-    ContaminationReport, GlobalMetrics, GradeRecord, Incentive, LeaderboardEntry, Material,
-    MaterialComposition, Milestone, OptionalWasteType, ParticipantRole, PendingTransfer,
-    PendingTransferStatus, ProcessingRecord, ProcessingStatus, RecyclingGoal, RecyclingStats,
-    SeasonalMultiplier, TransferItemType, TransferRecord, TransferStatus, Waste, WasteGrade,
-    WasteTransfer, WasteType,
+    CollectionRoute, ContaminationReport, Dispute, DisputeStatus, GlobalMetrics, GradeRecord,
+    Incentive, LeaderboardEntry, Material, MaterialComposition, Milestone, OptionalWasteType,
+    ParticipantRole, PendingTransfer, PendingTransferStatus, ProcessingRecord, ProcessingStatus,
+    RecyclingGoal, RecyclingStats, ReputationBadge, RouteStatus, SeasonalMultiplier,
+    TransferItemType, TransferRecord, TransferStatus, Waste, WasteGrade, WasteTransfer, WasteType,
 };
 pub use types::calculate_carbon_credits;
 
@@ -51,10 +51,24 @@ const CONTAMINATED_LIST: Symbol = symbol_short!("CONT_LST");
 const CARB_LIST_CNT: Symbol = symbol_short!("CARB_CNT");
 const CARB_LIST_IDX: Symbol = symbol_short!("CARB_IDX");
 
+// Dispute system counters (issue #549)
+const DISPUTE_CNT: Symbol = symbol_short!("DISP_CNT");
+
+// Collection route counters (issue #552)
+const ROUTE_CNT: Symbol = symbol_short!("ROUTE_CNT");
+
 // Reputation delta constants
 const REP_TRANSFER: i128 = 5;
 const REP_CONFIRM: i128 = 3;
 const REP_VERIFY: i128 = 10;
+
+/// Reputation score bounds
+const REP_MAX: i128 = 10_000;
+const REP_MIN: i128 = -1_000;
+
+/// Reputation decay configuration: lose 1 point per day after 30 days of inactivity.
+const DECAY_WINDOW_SECS: u64 = 30 * 24 * 3600;
+const DECAY_PER_DAY: i128 = 1;
 
 /// 7 days in seconds
 const PROPOSAL_TTL_SECS: u64 = 7 * 24 * 60 * 60;
@@ -393,11 +407,13 @@ impl ScavengerContract {
         }
     }
 
-    /// Apply a reputation delta to a participant (clamped to [-1000, 10000]).
+    /// Apply a reputation delta to a participant (clamped to [REP_MIN, REP_MAX]).
+    /// Also updates `last_active_at` so decay timers reset on activity.
     fn apply_reputation(env: &Env, address: &Address, delta: i128) {
         let key = (address.clone(),);
         if let Some(mut p) = env.storage().instance().get::<_, Participant>(&key) {
-            p.reputation_score = (p.reputation_score + delta).max(-1000).min(10000);
+            p.reputation_score = (p.reputation_score + delta).max(REP_MIN).min(REP_MAX);
+            p.last_active_at = env.ledger().timestamp();
             env.storage().instance().set(&key, &p);
         }
     }
@@ -2333,6 +2349,10 @@ impl ScavengerContract {
             return Err(Error::WasteDeactivated);
         }
 
+        if waste.is_frozen {
+            return Err(Error::WasteFrozen);
+        }
+
         if waste.is_expired(env.ledger().timestamp()) {
             return Err(Error::WasteExpired);
         }
@@ -3106,8 +3126,9 @@ impl ScavengerContract {
         // Distribute token rewards using the helper which also emits TOKENS_REWARDED events
         Self::_reward_tokens(&env, material_id, tokens_earned as u128);
 
-        // Reputation: reward submitter for verified waste
+        // Reputation: reward submitter for verified waste, and verifier for vetting
         Self::apply_reputation(&env, &material.submitter, REP_VERIFY);
+        Self::apply_reputation(&env, &verifier, REP_VERIFY);
 
         material
     }
@@ -6186,5 +6207,397 @@ impl ScavengerContract {
     pub fn get_participant_recycling_rate(env: Env, participant: Address) -> u32 {
         let stats: Option<RecyclingStats> = env.storage().instance().get(&("stats", participant));
         stats.map(|s| s.recycling_rate).unwrap_or(0)
+    }
+
+    // ========== Dispute Resolution (issue #549) ==========
+
+    /// Open a dispute against a waste item.
+    ///
+    /// The disputer must be a registered participant. The waste is frozen
+    /// (cannot be transferred) until an admin calls [`resolve_dispute`].
+    ///
+    /// # Panics
+    /// - `"Waste not found"` if the waste does not exist.
+    /// - `"Reason exceeds 500 characters"` if the reason is too long.
+    /// - `"Waste already has an open dispute"` if the waste is already frozen.
+    pub fn create_dispute(
+        env: Env,
+        disputer: Address,
+        waste_id: u128,
+        reason: String,
+    ) -> Dispute {
+        Self::require_not_paused(&env);
+        Self::only_registered(&env, &disputer);
+
+        if reason.len() > 500 {
+            panic!("Reason exceeds 500 characters");
+        }
+
+        let mut waste: types::Waste = env
+            .storage()
+            .instance()
+            .get(&("waste_v2", waste_id))
+            .expect("Waste not found");
+
+        if waste.is_frozen {
+            panic!("Waste already has an open dispute");
+        }
+
+        let id: u64 = env
+            .storage()
+            .instance()
+            .get(&DISPUTE_CNT)
+            .unwrap_or(0u64)
+            + 1;
+        env.storage().instance().set(&DISPUTE_CNT, &id);
+
+        let dispute = Dispute {
+            id,
+            waste_id,
+            disputer: disputer.clone(),
+            reason,
+            status: DisputeStatus::Pending,
+            created_at: env.ledger().timestamp(),
+            resolved_at: 0,
+            resolution_note: String::from_str(&env, ""),
+        };
+        env.storage().instance().set(&("dispute", id), &dispute);
+
+        // Freeze waste to block transfers until resolution
+        waste.is_frozen = true;
+        env.storage()
+            .instance()
+            .set(&("waste_v2", waste_id), &waste);
+
+        env.events().publish(
+            (symbol_short!("disp_new"), id),
+            (waste_id, disputer, dispute.created_at),
+        );
+
+        dispute
+    }
+
+    /// Resolve a pending dispute (admin only).
+    ///
+    /// `accepted = true` marks the dispute `Resolved`; `false` marks it `Rejected`.
+    /// In either case, the underlying waste is unfrozen so transfers can proceed.
+    ///
+    /// # Panics
+    /// - `"Dispute not found"`.
+    /// - `"Dispute is not pending"` if the dispute was already resolved.
+    /// - Admin panic if caller is not an admin.
+    pub fn resolve_dispute(
+        env: Env,
+        admin: Address,
+        dispute_id: u64,
+        accepted: bool,
+        note: String,
+    ) -> Dispute {
+        Self::require_admin(&env, &admin);
+
+        let mut dispute: Dispute = env
+            .storage()
+            .instance()
+            .get(&("dispute", dispute_id))
+            .expect("Dispute not found");
+
+        if dispute.status != DisputeStatus::Pending {
+            panic!("Dispute is not pending");
+        }
+
+        dispute.status = if accepted {
+            DisputeStatus::Resolved
+        } else {
+            DisputeStatus::Rejected
+        };
+        dispute.resolved_at = env.ledger().timestamp();
+        dispute.resolution_note = note;
+        env.storage()
+            .instance()
+            .set(&("dispute", dispute_id), &dispute);
+
+        // Unfreeze the waste regardless of outcome
+        if let Some(mut waste) = env
+            .storage()
+            .instance()
+            .get::<_, types::Waste>(&("waste_v2", dispute.waste_id))
+        {
+            waste.is_frozen = false;
+            env.storage()
+                .instance()
+                .set(&("waste_v2", dispute.waste_id), &waste);
+        }
+
+        env.events().publish(
+            (symbol_short!("disp_res"), dispute_id),
+            (admin, accepted, dispute.resolved_at),
+        );
+
+        dispute
+    }
+
+    /// Get a dispute by ID.
+    pub fn get_dispute(env: Env, dispute_id: u64) -> Option<Dispute> {
+        env.storage().instance().get(&("dispute", dispute_id))
+    }
+
+    /// List all disputes with the given status.
+    pub fn get_disputes(env: Env, status: DisputeStatus) -> Vec<Dispute> {
+        let count: u64 = env.storage().instance().get(&DISPUTE_CNT).unwrap_or(0);
+        let mut result = Vec::new(&env);
+        for id in 1..=count {
+            if let Some(d) = env
+                .storage()
+                .instance()
+                .get::<_, Dispute>(&("dispute", id))
+            {
+                if d.status == status {
+                    result.push_back(d);
+                }
+            }
+        }
+        result
+    }
+
+    // ========== Reputation System (issue #551) ==========
+
+    /// Get the reputation badge tier for a participant based on their score.
+    pub fn get_reputation_badge(env: Env, address: Address) -> ReputationBadge {
+        let key = (address,);
+        let score = env
+            .storage()
+            .instance()
+            .get::<_, Participant>(&key)
+            .map(|p| p.reputation_score)
+            .unwrap_or(0);
+        ReputationBadge::from_score(score)
+    }
+
+    /// Penalize a participant's reputation by a negative delta (admin only).
+    ///
+    /// `delta` must be strictly negative. The resulting score is clamped to
+    /// `[REP_MIN, REP_MAX]`.
+    ///
+    /// # Panics
+    /// - `"Delta must be negative for a penalty"` if `delta >= 0`.
+    /// - Admin panic if caller is not an admin.
+    /// - `"Participant not found"` if the participant does not exist.
+    pub fn penalize_reputation(env: Env, admin: Address, target: Address, delta: i128) {
+        Self::require_admin(&env, &admin);
+        if delta >= 0 {
+            panic!("Delta must be negative for a penalty");
+        }
+        let key = (target.clone(),);
+        let mut p: Participant = env
+            .storage()
+            .instance()
+            .get(&key)
+            .expect("Participant not found");
+        p.reputation_score = (p.reputation_score + delta).max(REP_MIN).min(REP_MAX);
+        env.storage().instance().set(&key, &p);
+
+        env.events().publish(
+            (symbol_short!("rep_pen"), target),
+            (admin, delta, p.reputation_score),
+        );
+    }
+
+    /// Apply reputation decay for a participant if they have been inactive
+    /// beyond [`DECAY_WINDOW_SECS`]. Only decays positive scores; never drives
+    /// the score below 0 via decay.
+    pub fn decay_reputation(env: Env, address: Address) -> i128 {
+        let key = (address.clone(),);
+        let mut p: Participant = match env.storage().instance().get(&key) {
+            Some(p) => p,
+            None => return 0,
+        };
+
+        let now = env.ledger().timestamp();
+        let elapsed = now.saturating_sub(p.last_active_at);
+        if elapsed <= DECAY_WINDOW_SECS || p.reputation_score <= 0 {
+            return p.reputation_score;
+        }
+
+        let days_inactive = ((elapsed - DECAY_WINDOW_SECS) / 86_400) as i128;
+        if days_inactive == 0 {
+            return p.reputation_score;
+        }
+
+        let decay = days_inactive * DECAY_PER_DAY;
+        let new_score = (p.reputation_score - decay).max(0);
+        p.reputation_score = new_score;
+        p.last_active_at = now;
+        env.storage().instance().set(&key, &p);
+
+        env.events()
+            .publish((symbol_short!("rep_dcy"), address), (decay, new_score));
+
+        new_score
+    }
+
+    /// Return all participants whose reputation score is at least `min_score`.
+    pub fn get_participants_by_reputation(env: Env, min_score: i128) -> Vec<Address> {
+        let index: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&PART_INDEX)
+            .unwrap_or(Vec::new(&env));
+        let mut result = Vec::new(&env);
+        for addr in index.iter() {
+            if let Some(p) = env
+                .storage()
+                .instance()
+                .get::<_, Participant>(&(addr.clone(),))
+            {
+                if p.reputation_score >= min_score {
+                    result.push_back(addr);
+                }
+            }
+        }
+        result
+    }
+
+    // ========== Collection Routes (issue #552) ==========
+
+    /// Create a new collection route for a collector with the given waste IDs.
+    ///
+    /// # Panics
+    /// - `"Only collectors can create routes"` if `collector`'s role is not Collector.
+    /// - `"Route must contain at least one waste item"` if `waste_ids` is empty.
+    /// - `"Route cannot exceed 50 waste items"` if length > 50.
+    /// - `"Waste not found or inactive"` for any unknown / inactive ID.
+    pub fn create_collection_route(
+        env: Env,
+        collector: Address,
+        waste_ids: Vec<u128>,
+    ) -> CollectionRoute {
+        Self::require_not_paused(&env);
+        collector.require_auth();
+
+        let p: Participant = env
+            .storage()
+            .instance()
+            .get(&(collector.clone(),))
+            .expect("Collector not registered");
+        if p.role != ParticipantRole::Collector {
+            panic!("Only collectors can create routes");
+        }
+
+        if waste_ids.is_empty() {
+            panic!("Route must contain at least one waste item");
+        }
+        if waste_ids.len() > 50 {
+            panic!("Route cannot exceed 50 waste items");
+        }
+
+        // Validate each waste exists and is active
+        for id in waste_ids.iter() {
+            let w: types::Waste = match env.storage().instance().get(&("waste_v2", id)) {
+                Some(w) => w,
+                None => panic!("Waste not found or inactive"),
+            };
+            if !w.is_active {
+                panic!("Waste not found or inactive");
+            }
+        }
+
+        let id: u64 = env
+            .storage()
+            .instance()
+            .get(&ROUTE_CNT)
+            .unwrap_or(0u64)
+            + 1;
+        env.storage().instance().set(&ROUTE_CNT, &id);
+
+        let route = CollectionRoute {
+            id,
+            collector: collector.clone(),
+            waste_ids,
+            status: RouteStatus::Pending,
+            created_at: env.ledger().timestamp(),
+        };
+        env.storage().instance().set(&("route", id), &route);
+
+        env.events()
+            .publish((symbol_short!("rt_new"), id), (collector, route.created_at));
+
+        route
+    }
+
+    /// Mark a route as completed. Only the assigned collector can complete.
+    ///
+    /// # Panics
+    /// - `"Route not found"`.
+    /// - `"Only the assigned collector can complete this route"`.
+    /// - `"Route is not pending"`.
+    pub fn complete_route(env: Env, collector: Address, route_id: u64) -> CollectionRoute {
+        Self::require_not_paused(&env);
+        collector.require_auth();
+
+        let mut route: CollectionRoute = env
+            .storage()
+            .instance()
+            .get(&("route", route_id))
+            .expect("Route not found");
+
+        if route.collector != collector {
+            panic!("Only the assigned collector can complete this route");
+        }
+        if route.status != RouteStatus::Pending {
+            panic!("Route is not pending");
+        }
+
+        route.status = RouteStatus::Completed;
+        env.storage().instance().set(&("route", route_id), &route);
+
+        env.events().publish(
+            (symbol_short!("rt_done"), route_id),
+            (collector, env.ledger().timestamp()),
+        );
+
+        route.clone()
+    }
+
+    /// Retrieve a route by ID.
+    pub fn get_route(env: Env, route_id: u64) -> Option<CollectionRoute> {
+        env.storage().instance().get(&("route", route_id))
+    }
+
+    /// Return v2 waste IDs whose recorded coordinates are within `radius_km`
+    /// of the given (`lat`, `lon`) point. Coordinates are in microdegrees.
+    ///
+    /// Distance is approximated using a flat-earth model with ~111 km per
+    /// degree (≈ 8983 microdegrees per km). Good enough for short ranges and
+    /// route-planning queries.
+    pub fn get_wastes_in_radius(env: Env, lat: i128, lon: i128, radius_km: u32) -> Vec<u128> {
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&("waste_count",))
+            .unwrap_or(0);
+
+        // ~8983 microdegrees per km. Square the threshold to compare in microdegrees².
+        let threshold_microdeg: i128 = (radius_km as i128) * 8983;
+        let threshold_sq: i128 = threshold_microdeg * threshold_microdeg;
+
+        let mut result = Vec::new(&env);
+        for id in 1u128..=(count as u128) {
+            if let Some(w) = env
+                .storage()
+                .instance()
+                .get::<_, types::Waste>(&("waste_v2", id))
+            {
+                if !w.is_active {
+                    continue;
+                }
+                let dlat = w.latitude - lat;
+                let dlon = w.longitude - lon;
+                let dist_sq = dlat.saturating_mul(dlat).saturating_add(dlon.saturating_mul(dlon));
+                if dist_sq <= threshold_sq {
+                    result.push_back(id);
+                }
+            }
+        }
+        result
     }
 }

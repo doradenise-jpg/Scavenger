@@ -230,4 +230,8 @@ pub enum Error {
     /// (49) Listing amount or price is zero, or buyer equals seller.
     /// Returned by: `create_carbon_listing`, `purchase_carbon_listing`
     InvalidListing = 49,
+
+    /// (50) Waste is frozen (e.g. has an open dispute) and cannot be transferred.
+    /// Returned by: `transfer_waste_v2`
+    WasteFrozen = 50,
 }

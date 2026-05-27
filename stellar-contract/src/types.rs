@@ -756,6 +756,8 @@ pub struct Waste {
     pub recycled_timestamp: u64,
     /// Whether the waste is currently active in the system
     pub is_active: bool,
+    /// Whether the waste is frozen (e.g. due to an open dispute) and cannot be transferred
+    pub is_frozen: bool,
     /// Whether the waste has been confirmed/verified
     pub is_confirmed: bool,
     /// Address of the confirmer/verifier
@@ -828,6 +830,7 @@ impl Waste {
             longitude,
             recycled_timestamp,
             is_active,
+            is_frozen: false,
             is_confirmed,
             confirmer,
             grade: WasteGrade::C,
@@ -1134,6 +1137,7 @@ impl WasteBuilder {
             longitude: self.longitude,
             recycled_timestamp: self.recycled_timestamp,
             is_active: self.is_active,
+            is_frozen: false,
             is_confirmed: self.is_confirmed,
             confirmer,
             grade: self.grade,
@@ -2059,4 +2063,67 @@ pub struct LeaderboardEntry {
     pub participant: Address,
     pub score: u128,
     pub rank: u32,
+}
+
+// ========== Dispute Resolution Types (issue #549) ==========
+
+/// Status of a dispute over a waste item
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DisputeStatus {
+    /// Dispute opened, awaiting admin resolution
+    Pending = 0,
+    /// Admin accepted the dispute
+    Resolved = 1,
+    /// Admin rejected the dispute
+    Rejected = 2,
+}
+
+/// A dispute raised against a waste item
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Dispute {
+    pub id: u64,
+    pub waste_id: u128,
+    pub disputer: Address,
+    pub reason: soroban_sdk::String,
+    pub status: DisputeStatus,
+    pub created_at: u64,
+    pub resolved_at: u64,
+    pub resolution_note: soroban_sdk::String,
+}
+
+// ========== Reputation System Types (issue #551) ==========
+
+/// Tiered reputation badge based on a participant's score.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReputationBadge {
+    /// score < 100
+    None = 0,
+    /// 100 <= score < 500
+    Bronze = 1,
+    /// 500 <= score < 2000
+    Silver = 2,
+    /// 2000 <= score < 5000
+    Gold = 3,
+    /// score >= 5000
+    Platinum = 4,
+}
+
+impl ReputationBadge {
+    /// Map a reputation score to its corresponding badge tier.
+    pub fn from_score(score: i128) -> Self {
+        if score >= 5000 {
+            ReputationBadge::Platinum
+        } else if score >= 2000 {
+            ReputationBadge::Gold
+        } else if score >= 500 {
+            ReputationBadge::Silver
+        } else if score >= 100 {
+            ReputationBadge::Bronze
+        } else {
+            ReputationBadge::None
+        }
+    }
 }
