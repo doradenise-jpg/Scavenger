@@ -19,7 +19,11 @@ import {
   ShoppingBag,
   Award,
   BookOpen,
+  CalendarDays,
+  Heart,
+  TrendingUp,
 } from 'lucide-react'
+import { cn } from '@/lib/utils'
 import { useWallet } from '@/context/WalletContext'
 import { useAuth } from '@/context/AuthContext'
 import { Button } from '@/components/ui/Button'
@@ -93,6 +97,24 @@ const NAV_LINKS = [
     href: '/recycling-guide',
     roles: ['Recycler', 'Collector', 'Manufacturer'],
     icon: BookOpen
+  },
+  {
+    label: 'Subscriptions',
+    href: '/subscriptions',
+    roles: ['Recycler', 'Collector', 'Manufacturer'],
+    icon: CalendarDays
+  },
+  {
+    label: 'Donations',
+    href: '/donations',
+    roles: ['Recycler', 'Collector', 'Manufacturer'],
+    icon: Heart
+  },
+  {
+    label: 'Predictions',
+    href: '/predictions',
+    roles: ['Recycler', 'Collector', 'Manufacturer'],
+    icon: TrendingUp
   }
 ]
 
@@ -116,6 +138,9 @@ function getOnboardingDataAttribute(href: string): string | undefined {
     '/marketplace': 'marketplace',
     '/certifications': 'certifications',
     '/recycling-guide': 'recycling-guide',
+    '/subscriptions': 'subscriptions',
+    '/donations': 'donations',
+    '/predictions': 'predictions',
   }
   return attributeMap[href]
 }

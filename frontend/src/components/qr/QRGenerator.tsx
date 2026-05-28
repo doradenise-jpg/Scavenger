@@ -1,40 +1,46 @@
-import { useRef } from 'react';
-import QRCode from 'qrcode.react';
-import { Button } from '../ui/Button';
-import { Card } from '../ui/Card';
+import { useRef } from 'react'
+import { Button } from '../ui/Button'
+import { Card } from '../ui/Card'
 
 interface QRGeneratorProps {
-  wasteId: string;
-  wasteName?: string;
+  wasteId: string
+  wasteName?: string
 }
 
+const QR_API = 'https://api.qrserver.com/v1/create-qr-code/'
+
 export function QRGenerator({ wasteId, wasteName }: QRGeneratorProps) {
-  const qrRef = useRef<HTMLDivElement>(null);
+  const imgRef = useRef<HTMLImageElement>(null)
+
+  const src = `${QR_API}?size=200x200&data=${encodeURIComponent(wasteId)}&ecc=H`
 
   const downloadQR = () => {
-    const canvas = qrRef.current?.querySelector('canvas');
-    if (canvas) {
-      const url = canvas.toDataURL('image/png');
-      const link = document.createElement('a');
-      link.download = `waste-${wasteId}.png`;
-      link.href = url;
-      link.click();
-    }
-  };
+    const link = document.createElement('a')
+    link.download = `waste-${wasteId}.png`
+    link.href = src
+    link.click()
+  }
 
   return (
     <Card className="p-6 text-center">
-      <h3 className="text-lg font-semibold mb-4">
+      <h3 className="mb-4 text-lg font-semibold">
         {wasteName ? `QR Code for ${wasteName}` : 'Waste QR Code'}
       </h3>
-      
-      <div ref={qrRef} className="flex justify-center mb-4">
-        <QRCode value={wasteId} size={200} level="H" />
+
+      <div className="mb-4 flex justify-center">
+        <img
+          ref={imgRef}
+          src={src}
+          alt={`QR code for waste ${wasteId}`}
+          width={200}
+          height={200}
+          className="rounded-md border"
+        />
       </div>
-      
-      <p className="text-sm text-gray-600 mb-4">ID: {wasteId}</p>
-      
+
+      <p className="mb-4 text-sm text-gray-600 dark:text-gray-400">ID: {wasteId}</p>
+
       <Button onClick={downloadQR}>Download QR Code</Button>
     </Card>
-  );
+  )
 }

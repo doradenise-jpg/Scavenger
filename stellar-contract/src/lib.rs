@@ -2097,8 +2097,8 @@ impl ScavengerContract {
         Self::require_not_paused(&env);
         Self::only_registered(&env, &submitter);
 
-        let min_weight = Self::get_min_weight(&env);
-        if weight as u128 < min_weight {
+        let min_weight = Self::get_min_weight(env.clone());
+        if (weight as u128) < min_weight {
             panic!("Waste weight below minimum allowed");
         }
         if weight as u128 > MAX_WASTE_WEIGHT {
@@ -2173,7 +2173,7 @@ impl ScavengerContract {
         Self::require_not_paused(&env);
         Self::only_registered(&env, &recycler);
 
-        let min_weight = Self::get_min_weight(&env);
+        let min_weight = Self::get_min_weight(env.clone());
         if weight < min_weight {
             panic!("Waste weight below minimum allowed");
         }
