@@ -23,6 +23,7 @@ import {
 import { useWallet } from '@/context/WalletContext'
 import { useAuth } from '@/context/AuthContext'
 import { Button } from '@/components/ui/Button'
+import { NotificationBell } from '@/components/ui/NotificationBell'
 import { ThemeToggle } from '@/components/ui/ThemeToggle'
 import { SearchBar } from '@/components/ui/SearchBar'
 import { OfflineIndicator } from '@/components/OfflineIndicator'
