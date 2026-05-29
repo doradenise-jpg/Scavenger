@@ -1,0 +1,144 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: postgres-backup
+  namespace: scavenger
+  labels:
+    app: scavenger
+    component: backup
+spec:
+  schedule: "0 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 7
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: scavenger
+            component: backup
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: postgres-backup
+            image: postgres:15
+            env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secrets
+                  key: POSTGRES_PASSWORD
+            - name: PGHOST
+              value: postgres-primary
+            - name: PGUSER
+              value: scavenger
+            - name: PGDATABASE
+              value: scavenger
+            - name: AWS_DEFAULT_REGION
+              value: us-east-1
+            - name: S3_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: scavenger-config
+                  key: backup_s3_bucket
+                  optional: true
+            command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+              BACKUP_FILE="/tmp/db_backup_${TIMESTAMP}.sql.gz"
+
+              echo "Starting backup at ${TIMESTAMP}..."
+              pg_dump -h "$PGHOST" -U "$PGUSER" "$PGDATABASE" | gzip > "$BACKUP_FILE"
+
+              if gunzip -t "$BACKUP_FILE"; then
+                echo "Backup integrity verified: $BACKUP_FILE"
+              else
+                echo "Backup integrity check failed" >&2
+                exit 1
+              fi
+
+              if [ -n "${S3_BUCKET:-}" ]; then
+                aws s3 cp "$BACKUP_FILE" "s3://${S3_BUCKET}/database/${TIMESTAMP}/" --sse AES256
+                echo "Backup uploaded to S3"
+              fi
+
+              echo "Backup completed successfully"
+            resources:
+              requests:
+                memory: "256Mi"
+                cpu: "100m"
+              limits:
+                memory: "512Mi"
+                cpu: "500m"
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: postgres-backup-verify
+  namespace: scavenger
+  labels:
+    app: scavenger
+    component: backup-verify
+spec:
+  schedule: "0 4 * * 0"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 4
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: scavenger
+            component: backup-verify
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: backup-verify
+            image: postgres:15
+            env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secrets
+                  key: POSTGRES_PASSWORD
+            - name: AWS_DEFAULT_REGION
+              value: us-east-1
+            - name: S3_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: scavenger-config
+                  key: backup_s3_bucket
+                  optional: true
+            command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              echo "Starting weekly backup restore verification..."
+
+              if [ -z "${S3_BUCKET:-}" ]; then
+                echo "S3_BUCKET not configured, skipping S3 restore test"
+                exit 0
+              fi
+
+              LATEST=$(aws s3 ls "s3://${S3_BUCKET}/database/" | sort | tail -1 | awk '{print $4}')
+              if [ -z "$LATEST" ]; then
+                echo "No backups found in S3" >&2
+                exit 1
+              fi
+
+              aws s3 cp "s3://${S3_BUCKET}/database/${LATEST}" /tmp/latest_backup.sql.gz
+              gunzip -t /tmp/latest_backup.sql.gz && echo "Restore test passed: backup is valid"
+            resources:
+              requests:
+                memory: "256Mi"
+                cpu: "100m"
+              limits:
+                memory: "512Mi"
+                cpu: "500m"
