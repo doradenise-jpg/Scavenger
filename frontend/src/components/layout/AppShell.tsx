@@ -22,6 +22,8 @@ import {
   CalendarDays,
   Heart,
   TrendingUp,
+  Trophy,
+  WifiOff,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useWallet } from '@/context/WalletContext'
@@ -115,6 +117,18 @@ const NAV_LINKS = [
     href: '/predictions',
     roles: ['Recycler', 'Collector', 'Manufacturer'],
     icon: TrendingUp
+  },
+  {
+    label: 'Achievements',
+    href: '/achievements',
+    roles: ['Recycler', 'Collector', 'Manufacturer'],
+    icon: Trophy
+  },
+  {
+    label: 'Offline',
+    href: '/offline',
+    roles: ['Recycler', 'Collector', 'Manufacturer'],
+    icon: WifiOff
   }
 ]
 
@@ -141,6 +155,8 @@ function getOnboardingDataAttribute(href: string): string | undefined {
     '/subscriptions': 'subscriptions',
     '/donations': 'donations',
     '/predictions': 'predictions',
+    '/achievements': 'achievements',
+    '/offline': 'offline',
   }
   return attributeMap[href]
 }

@@ -13,6 +13,7 @@ import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { getErrorMessage } from '@/lib/contractErrors'
 import { initWebVitals } from '@/lib/webVitals'
 import { getDB, setQueryData, getQueryData, removeQueryData } from '@/lib/indexedDB'
+import '@/i18n/config'
 import './index.css'
 
 // Initialize Web Vitals monitoring

@@ -76,6 +76,12 @@ const RecyclingGuidePage = lazy(() =>
 const PerformanceMonitoringPage = lazy(() =>
   import('@/pages/PerformanceMonitoringPage').then((m) => ({ default: m.PerformanceMonitoringPage }))
 )
+const GamificationPage = lazy(() =>
+  import('@/pages/GamificationPage').then((m) => ({ default: m.GamificationPage }))
+)
+const OfflinePage = lazy(() =>
+  import('@/pages/OfflinePage').then((m) => ({ default: m.OfflinePage }))
+)
 
 // eslint-disable-next-line react-refresh/only-export-components
 function PageFallback() {
@@ -129,7 +135,9 @@ export const router = createBrowserRouter([
       { path: 'marketplace', element: <WasteMarketplacePage /> },
       { path: 'certifications', element: <WasteCertificationPage /> },
       { path: 'recycling-guide', element: <RecyclingGuidePage /> },
-      { path: 'performance', element: <PerformanceMonitoringPage /> }
+      { path: 'performance', element: <PerformanceMonitoringPage /> },
+      { path: 'achievements', element: <GamificationPage /> },
+      { path: 'offline', element: <OfflinePage /> }
     ]
   },
   { path: '*', element: <NotFoundPage /> }

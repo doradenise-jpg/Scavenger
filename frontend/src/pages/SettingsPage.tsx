@@ -8,6 +8,7 @@ import { NotificationStore, type NotificationPreferences, type NotificationType 
 import { NETWORK_CONFIGS } from '@/lib/stellar'
 import { Button } from '@/components/ui/Button'
 import { Switch } from '@/components/ui/Switch'
+import { LanguageSelector } from '@/components/ui/LanguageSelector'
 import { cn } from '@/lib/utils'
 import { useOnboarding } from '@/hooks/useOnboarding'
 
@@ -156,6 +157,13 @@ export function SettingsPage() {
             <Monitor className="mr-1.5 h-3.5 w-3.5" />
             Use system
           </Button>
+        </Row>
+      </Section>
+
+      {/* Language */}
+      <Section title="Language">
+        <Row label="Display language" description="Choose your preferred language (Arabic enables RTL)">
+          <LanguageSelector />
         </Row>
       </Section>
 
