@@ -1,0 +1,109 @@
+name: Automated Backup
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      verify_only:
+        description: 'Only run backup verification (skip new backup)'
+        required: false
+        default: 'false'
+
+jobs:
+  backup:
+    name: Database Backup
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.verify_only != 'true' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+
+      - name: Run database backup
+        env:
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_NAME: ${{ secrets.DB_NAME || 'scavenger' }}
+          BACKUP_DIR: /tmp/backups
+          RETENTION_DAYS: '30'
+        run: bash scripts/backup-database.sh
+
+      - name: Publish backup metrics
+        run: |
+          aws cloudwatch put-metric-data \
+            --namespace "Scavenger/Backups" \
+            --metric-name "BackupSuccess" \
+            --value 1 \
+            --unit Count \
+            --region ${{ secrets.AWS_REGION || 'us-east-1' }}
+
+  verify:
+    name: Backup Verification
+    runs-on: ubuntu-latest
+    needs: [backup]
+    if: ${{ always() && (needs.backup.result == 'success' || github.event.inputs.verify_only == 'true') }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+
+      - name: Verify backup restore
+        env:
+          DB_HOST: ${{ secrets.DB_HOST }}
+        run: bash scripts/verify-backup-restore.sh
+
+      - name: Publish verification metrics
+        if: always()
+        run: |
+          VALUE=${{ job.status == 'success' && '1' || '0' }}
+          aws cloudwatch put-metric-data \
+            --namespace "Scavenger/Backups" \
+            --metric-name "BackupVerificationSuccess" \
+            --value "$VALUE" \
+            --unit Count \
+            --region ${{ secrets.AWS_REGION || 'us-east-1' }}
+
+  weekly-restore-test:
+    name: Weekly Full Restore Test
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'schedule' && github.event.schedule == '0 2 * * 0' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+
+      - name: Full restore test
+        env:
+          DB_HOST: ${{ secrets.DB_HOST }}
+        run: bash scripts/verify-backup-restore.sh
+
+      - name: Notify on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: 'Weekly backup restore test FAILED',
+              body: 'The weekly full backup restore test failed. See workflow run: ' + context.serverUrl + '/' + context.repo.owner + '/' + context.repo.repo + '/actions/runs/' + context.runId,
+              labels: ['bug', 'backup']
+            })

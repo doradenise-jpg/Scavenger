@@ -1,0 +1,54 @@
+name: Load Balancer Health Check
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  health-check:
+    name: Check Load Balancer Health
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+
+      - name: Check ALB target group health
+        run: bash scripts/check-load-balancer.sh
+
+      - name: Verify healthy target count
+        run: |
+          TG_ARN=$(aws elbv2 describe-target-groups \
+            --names "${{ vars.ENVIRONMENT || 'prod' }}-scavenger-tg" \
+            --query 'TargetGroups[0].TargetGroupArn' \
+            --output text)
+
+          HEALTHY=$(aws elbv2 describe-target-health \
+            --target-group-arn "$TG_ARN" \
+            --query 'TargetHealthDescriptions[?TargetHealth.State==`healthy`] | length(@)' \
+            --output text)
+
+          echo "Healthy targets: $HEALTHY"
+          if [ "$HEALTHY" -lt 1 ]; then
+            echo "::error::No healthy targets in load balancer"
+            exit 1
+          fi
+
+      - name: Check ALB response time alarm
+        run: |
+          STATE=$(aws cloudwatch describe-alarms \
+            --alarm-names "${{ vars.ENVIRONMENT || 'prod' }}-alb-response-time" \
+            --query 'MetricAlarms[0].StateValue' \
+            --output text 2>/dev/null || echo "MISSING")
+
+          echo "ALB response time alarm state: $STATE"
+          if [ "$STATE" = "ALARM" ]; then
+            echo "::warning::ALB response time alarm is in ALARM state"
+          fi

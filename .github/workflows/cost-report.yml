@@ -1,0 +1,98 @@
+name: Cost Report
+
+on:
+  schedule:
+    - cron: '0 8 1 * *'
+  workflow_dispatch:
+    inputs:
+      days:
+        description: 'Number of days to analyze'
+        required: false
+        default: '30'
+
+jobs:
+  cost-report:
+    name: Generate Cost Report
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+
+      - name: Run cost analysis
+        env:
+          ENVIRONMENT: ${{ vars.ENVIRONMENT || 'prod' }}
+          COST_ANALYSIS_DAYS: ${{ github.event.inputs.days || '30' }}
+        run: bash scripts/cost-analysis.sh | tee /tmp/cost-report.txt
+
+      - name: Upload cost report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cost-report-${{ github.run_id }}
+          path: /tmp/cost-report.txt
+          retention-days: 90
+
+      - name: Check for cost anomalies
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+          MONITORS=$(aws ce get-anomaly-monitors \
+            --query 'AnomalyMonitors[?MonitorName==`scavenger-anomaly-monitor`].MonitorArn' \
+            --output text 2>/dev/null || echo "")
+
+          if [ -n "$MONITORS" ]; then
+            ANOMALIES=$(aws ce get-anomalies \
+              --monitor-arn-list "$MONITORS" \
+              --date-interval "StartDate=$(date -d '-7 days' +%Y-%m-%d 2>/dev/null || date -v-7d +%Y-%m-%d)" \
+              --query 'Anomalies[?AnomalyScore.CurrentScore>`0.5`] | length(@)' \
+              --output text 2>/dev/null || echo "0")
+
+            echo "Cost anomalies detected in past 7 days: $ANOMALIES"
+            if [ "$ANOMALIES" -gt 0 ]; then
+              echo "::warning::$ANOMALIES cost anomalies detected — review Cost Explorer"
+            fi
+          fi
+
+  check-budget-alerts:
+    name: Check Budget Thresholds
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+
+      - name: Check budget utilization
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+          UTIL=$(aws budgets describe-budgets \
+            --account-id "$ACCOUNT_ID" \
+            --query 'Budgets[?contains(BudgetName,`scavenger`)].{limit:BudgetLimit.Amount,actual:CalculatedSpend.ActualSpend.Amount}' \
+            --output json 2>/dev/null || echo "[]")
+
+          echo "$UTIL" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          for b in data:
+              limit = float(b.get('limit') or 0)
+              actual = float(b.get('actual') or 0)
+              if limit > 0:
+                  pct = (actual / limit) * 100
+                  print(f'Budget utilization: \${actual:.2f} / \${limit:.2f} ({pct:.1f}%)')
+                  if pct >= 90:
+                      print(f'::error::Budget is at {pct:.1f}% — immediate action required')
+                  elif pct >= 80:
+                      print(f'::warning::Budget is at {pct:.1f}% — review spending')
+          "
