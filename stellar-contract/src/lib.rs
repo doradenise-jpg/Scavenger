@@ -10,6 +10,7 @@ mod validation;
 mod verification;
 mod upgrade;
 mod explorer;
+mod analytics;
 
 pub use errors::Error;
 pub use types::{
@@ -24,6 +25,7 @@ pub use types::calculate_carbon_credits;
 pub use verification::{VerificationRecord, VerificationState, VerificationWorkflow};
 pub use upgrade::{UpgradeProposal, UpgradeStatus, ProxyState, UpgradeHistory};
 pub use explorer::{TransactionTracker, TransactionType, TransactionStatus, ExplorerConfig};
+pub use analytics::{AnalyticsReport, ReportType, CustomQuery, AggregationType, AnalyticsDataPoint, AnalyticsEngine};
 
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, token, Address, Env, String, Symbol, Vec,
@@ -76,6 +78,11 @@ const UPGRADE_HISTORY: Symbol = symbol_short!("UPG_HIST");
 // Explorer integration (issue #651)
 const TRANSACTION_CNT: Symbol = symbol_short!("TX_CNT");
 const EXPLORER_CONFIG: Symbol = symbol_short!("EXP_CFG");
+
+// Analytics system (issue #650)
+const ANALYTICS_REPORT_CNT: Symbol = symbol_short!("ANA_CNT");
+const CUSTOM_QUERY_CNT: Symbol = symbol_short!("QRY_CNT");
+const ANALYTICS_DATA: Symbol = symbol_short!("ANA_DATA");
 
 // Reputation delta constants
 const REP_TRANSFER: i128 = 5;
@@ -7236,5 +7243,200 @@ impl ScavengerContract {
             .get(&("transaction", tx_id))?;
 
         Some(tracker.explorer_link)
+    }
+
+    // ============ Advanced Analytics System (Issue #650) ============
+
+    /// Creates an analytics report
+    pub fn create_analytics_report(
+        env: Env,
+        report_type: analytics::ReportType,
+        title: String,
+        description: String,
+        period_start: u64,
+        period_end: u64,
+    ) -> analytics::AnalyticsReport {
+        let report_id: u64 = env
+            .storage()
+            .instance()
+            .get(&ANALYTICS_REPORT_CNT)
+            .unwrap_or(0);
+
+        let creator = env.current_contract_address();
+
+        let report = analytics::AnalyticsReport::new(
+            &env,
+            report_id,
+            report_type,
+            title,
+            description,
+            creator,
+            period_start,
+            period_end,
+        );
+
+        // Store report
+        env.storage()
+            .instance()
+            .set(&("analytics_report", report_id), &report);
+
+        // Update counter
+        env.storage()
+            .instance()
+            .set(&ANALYTICS_REPORT_CNT, &(report_id + 1));
+
+        // Emit event
+        events::emit_analytics_report_created(&env, report_id, report_type);
+
+        report
+    }
+
+    /// Adds a data point to an analytics report
+    pub fn add_analytics_data_point(
+        env: Env,
+        report_id: u64,
+        metric: String,
+        value: u128,
+        label: String,
+    ) -> analytics::AnalyticsDataPoint {
+        let data_point = analytics::AnalyticsDataPoint::new(&env, metric, value, label);
+
+        // Store data point
+        let data_key = ("analytics_data", report_id, data_point.timestamp);
+        env.storage().instance().set(&data_key, &data_point);
+
+        // Update report data point count
+        if let Some(mut report) = env
+            .storage()
+            .instance()
+            .get::<_, analytics::AnalyticsReport>(&("analytics_report", report_id))
+        {
+            report.add_data_point();
+            env.storage()
+                .instance()
+                .set(&("analytics_report", report_id), &report);
+        }
+
+        data_point
+    }
+
+    /// Gets an analytics report
+    pub fn get_analytics_report(env: Env, report_id: u64) -> Option<analytics::AnalyticsReport> {
+        env.storage()
+            .instance()
+            .get(&("analytics_report", report_id))
+    }
+
+    /// Creates a custom analytics query
+    pub fn create_custom_query(
+        env: Env,
+        name: String,
+        description: String,
+        filters: String,
+        aggregation: analytics::AggregationType,
+    ) -> analytics::CustomQuery {
+        let query_id: u64 = env
+            .storage()
+            .instance()
+            .get(&CUSTOM_QUERY_CNT)
+            .unwrap_or(0);
+
+        let creator = env.current_contract_address();
+
+        let query = analytics::CustomQuery::new(
+            &env,
+            query_id,
+            name,
+            description,
+            creator,
+            filters,
+            aggregation,
+        );
+
+        // Store query
+        env.storage()
+            .instance()
+            .set(&("custom_query", query_id), &query);
+
+        // Update counter
+        env.storage()
+            .instance()
+            .set(&CUSTOM_QUERY_CNT, &(query_id + 1));
+
+        // Emit event
+        events::emit_custom_query_created(&env, query_id);
+
+        query
+    }
+
+    /// Executes a custom query
+    pub fn execute_custom_query(env: Env, query_id: u64) -> analytics::CustomQuery {
+        let mut query: analytics::CustomQuery = env
+            .storage()
+            .instance()
+            .get(&("custom_query", query_id))
+            .expect("Query not found");
+
+        query.execute(&env);
+
+        // Store updated query
+        env.storage()
+            .instance()
+            .set(&("custom_query", query_id), &query);
+
+        // Emit event
+        events::emit_custom_query_executed(&env, query_id);
+
+        query
+    }
+
+    /// Gets a custom query
+    pub fn get_custom_query(env: Env, query_id: u64) -> Option<analytics::CustomQuery> {
+        env.storage()
+            .instance()
+            .get(&("custom_query", query_id))
+    }
+
+    /// Gets all reports of a specific type
+    pub fn get_reports_by_type(
+        env: Env,
+        report_type: analytics::ReportType,
+    ) -> Vec<u64> {
+        let mut result = Vec::new(&env);
+        let report_count: u64 = env
+            .storage()
+            .instance()
+            .get(&ANALYTICS_REPORT_CNT)
+            .unwrap_or(0);
+
+        for id in 0..report_count {
+            if let Some(report) = env
+                .storage()
+                .instance()
+                .get::<_, analytics::AnalyticsReport>(&("analytics_report", id))
+            {
+                if report.report_type == report_type {
+                    result.push_back(id);
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Gets all custom queries
+    pub fn get_all_custom_queries(env: Env) -> Vec<u64> {
+        let mut result = Vec::new(&env);
+        let query_count: u64 = env
+            .storage()
+            .instance()
+            .get(&CUSTOM_QUERY_CNT)
+            .unwrap_or(0);
+
+        for id in 0..query_count {
+            result.push_back(id);
+        }
+
+        result
     }
 }

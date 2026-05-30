@@ -326,3 +326,24 @@ pub fn emit_transaction_status_updated(
     env.events()
         .publish((symbol_short!("tx_stat"), tx_id), status.to_u32());
 }
+
+// ============ Advanced Analytics Events (Issue #650) ============
+
+pub fn emit_analytics_report_created(
+    env: &Env,
+    report_id: u64,
+    report_type: crate::analytics::ReportType,
+) {
+    env.events()
+        .publish((symbol_short!("ana_rep"), report_id), report_type.to_u32());
+}
+
+pub fn emit_custom_query_created(env: &Env, query_id: u64) {
+    env.events()
+        .publish((symbol_short!("qry_cre"), query_id), ());
+}
+
+pub fn emit_custom_query_executed(env: &Env, query_id: u64) {
+    env.events()
+        .publish((symbol_short!("qry_exe"), query_id), ());
+}
