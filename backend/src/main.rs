@@ -1,10 +1,13 @@
 mod services;
+mod middleware;
 
 use actix_web::{web, App, HttpServer, HttpResponse};
 use services::{
     EmailService, SendGridEmailService, NotificationService, FirebaseNotificationService,
     ReportService, ReportingService, StorageService, S3StorageService,
+    WebhookManager, ExportService,
 };
+use middleware::{RateLimitMiddleware, RateLimitConfig};
 use std::sync::Arc;
 use tracing::info;
 use tracing_subscriber::{fmt, EnvFilter, prelude::*};
@@ -51,12 +54,17 @@ async fn main() -> std::io::Result<()> {
         std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_string()),
     ));
 
+    let webhook_manager = Arc::new(WebhookManager::new());
+    let rate_limit_config = RateLimitConfig::default();
+
     HttpServer::new(move || {
         App::new()
+            .wrap(RateLimitMiddleware::new(rate_limit_config.clone()))
             .app_data(web::Data::new(email_service.clone()))
             .app_data(web::Data::new(notification_service.clone()))
             .app_data(web::Data::new(reporting_service.clone()))
             .app_data(web::Data::new(storage_service.clone()))
+            .app_data(web::Data::new(webhook_manager.clone()))
             .route("/health", web::get().to(health_check))
     })
     .bind("0.0.0.0:8080")?

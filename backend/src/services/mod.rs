@@ -6,6 +6,8 @@ pub mod recommendations;
 pub mod nft;
 pub mod multichain;
 pub mod api;
+pub mod webhook;
+pub mod export;
 
 pub use email::{EmailService, SendGridEmailService};
 pub use notifications::{NotificationService, FirebaseNotificationService};
@@ -15,3 +17,5 @@ pub use recommendations::RecommendationEngine;
 pub use nft::NFTManager;
 pub use multichain::ChainAbstraction;
 pub use api::ApiBuilder;
+pub use webhook::{WebhookManager, WebhookEvent, Webhook};
+pub use export::{ExportService, ExportFormat, ExportData};
