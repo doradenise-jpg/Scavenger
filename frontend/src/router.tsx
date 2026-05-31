@@ -82,6 +82,18 @@ const GamificationPage = lazy(() =>
 const OfflinePage = lazy(() =>
   import('@/pages/OfflinePage').then((m) => ({ default: m.OfflinePage }))
 )
+const WasteHistoryPage = lazy(() =>
+  import('@/pages/WasteHistoryPage').then((m) => ({ default: m.WasteHistoryPage }))
+)
+const ParticipantSearchPage = lazy(() =>
+  import('@/pages/ParticipantSearchPage').then((m) => ({ default: m.ParticipantSearchPage }))
+)
+const WasteStatisticsPage = lazy(() =>
+  import('@/pages/WasteStatisticsPage').then((m) => ({ default: m.WasteStatisticsPage }))
+)
+const RewardTrackingPage = lazy(() =>
+  import('@/pages/RewardTrackingPage').then((m) => ({ default: m.RewardTrackingPage }))
+)
 
 // eslint-disable-next-line react-refresh/only-export-components
 function PageFallback() {
@@ -137,7 +149,11 @@ export const router = createBrowserRouter([
       { path: 'recycling-guide', element: <RecyclingGuidePage /> },
       { path: 'performance', element: <PerformanceMonitoringPage /> },
       { path: 'achievements', element: <GamificationPage /> },
-      { path: 'offline', element: <OfflinePage /> }
+      { path: 'offline', element: <OfflinePage /> },
+      { path: 'waste-history', element: <WasteHistoryPage /> },
+      { path: 'participant-search', element: <ParticipantSearchPage /> },
+      { path: 'waste-statistics', element: <WasteStatisticsPage /> },
+      { path: 'reward-tracking', element: <RewardTrackingPage /> }
     ]
   },
   { path: '*', element: <NotFoundPage /> }
