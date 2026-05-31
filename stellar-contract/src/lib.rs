@@ -14,12 +14,13 @@ mod analytics;
 
 pub use errors::Error;
 pub use types::{
-    Auction, CarbonListing, CertificationLevel, Challenge, ChallengeProgress, ChallengeStatus,
-    CollectionRoute, ContaminationReport, Dispute, DisputeStatus, GlobalMetrics, GradeRecord,
-    Incentive, LeaderboardEntry, Material, MaterialComposition, Milestone, OptionalWasteType,
-    ParticipantRole, PendingTransfer, PendingTransferStatus, ProcessingRecord, ProcessingStatus,
-    RecyclingGoal, RecyclingStats, ReputationBadge, RouteStatus, SeasonalMultiplier,
-    TransferItemType, TransferRecord, TransferStatus, Waste, WasteGrade, WasteTransfer, WasteType,
+    Auction, BatchStatus, CarbonListing, CertificationLevel, Challenge, ChallengeProgress,
+    ChallengeStatus, CollectionRoute, ContaminationReport, Dispute, DisputeStatus, GlobalMetrics,
+    GradeRecord, Incentive, LeaderboardEntry, LocationRecord, Material, MaterialComposition,
+    Milestone, OptionalWasteType, ParticipantRole, PendingTransfer, PendingTransferStatus,
+    ProcessingRecord, ProcessingStatus, QualityScore, RecyclingGoal, RecyclingStats,
+    ReputationBadge, RouteStatus, SeasonalMultiplier, TransferItemType, TransferRecord,
+    TransferStatus, Waste, WasteBatch, WasteCertification, WasteGrade, WasteTransfer, WasteType,
 };
 pub use types::calculate_carbon_credits;
 pub use verification::{VerificationRecord, VerificationState, VerificationWorkflow};
@@ -66,23 +67,18 @@ const DISPUTE_CNT: Symbol = symbol_short!("DISP_CNT");
 // Collection route counters (issue #552)
 const ROUTE_CNT: Symbol = symbol_short!("ROUTE_CNT");
 
-// Verification system (issue #653)
-const VERIFICATION_CNT: Symbol = symbol_short!("VER_CNT");
-const VERIFICATION_TIMEOUT: u64 = 7 * 24 * 60 * 60; // 7 days
+// Issue #654: Quality Scoring storage keys
+const QUALITY_SCORES: Symbol = symbol_short!("QUAL_SC");
 
-// Upgrade system (issue #652)
-const UPGRADE_PROPOSAL_CNT: Symbol = symbol_short!("UPG_CNT");
-const PROXY_STATE: Symbol = symbol_short!("PROXY");
-const UPGRADE_HISTORY: Symbol = symbol_short!("UPG_HIST");
+// Issue #655: Location Tracking storage keys
+const LOCATION_HISTORY: Symbol = symbol_short!("LOC_HIST");
 
-// Explorer integration (issue #651)
-const TRANSACTION_CNT: Symbol = symbol_short!("TX_CNT");
-const EXPLORER_CONFIG: Symbol = symbol_short!("EXP_CFG");
+// Issue #656: Batch Tracking storage keys
+const BATCH_COUNT: Symbol = symbol_short!("BATCH_CNT");
+const BATCH_INDEX: Symbol = symbol_short!("BATCH_IDX");
 
-// Analytics system (issue #650)
-const ANALYTICS_REPORT_CNT: Symbol = symbol_short!("ANA_CNT");
-const CUSTOM_QUERY_CNT: Symbol = symbol_short!("QRY_CNT");
-const ANALYTICS_DATA: Symbol = symbol_short!("ANA_DATA");
+// Issue #657: Certification storage keys
+const CERTIFICATIONS: Symbol = symbol_short!("CERT_IDX");
 
 // Reputation delta constants
 const REP_TRANSFER: i128 = 5;
@@ -6697,746 +6693,294 @@ impl ScavengerContract {
         result
     }
 
-    // ============ Verification Workflow Functions (Issue #653) ============
+    // ========================================================================
+    // Issue #654: Waste Quality Scoring Functions
+    // ========================================================================
 
-    /// Initiates a verification workflow for a waste item
-    pub fn start_verification_workflow(
+    /// Calculate and store quality score for a waste item
+    pub fn calculate_quality_score(
         env: Env,
         waste_id: u128,
-        verifier: Address,
-    ) -> VerificationRecord {
-        Self::require_not_paused(&env);
-        verifier.require_auth();
+        scorer: Address,
+    ) -> Result<QualityScore, Error> {
+        scorer.require_auth();
 
-        // Verify waste exists and is active
+        // Get waste item
         let waste: Waste = env
             .storage()
             .instance()
             .get(&("waste_v2", waste_id))
-            .expect("Waste not found");
+            .ok_or(Error::WasteNotFound)?;
 
-        if !waste.is_active {
-            panic!("Waste is not active");
+        // Calculate score based on waste properties (0-100)
+        let mut score: u32 = 50; // Base score
+
+        // Add points for grade
+        score += match waste.grade {
+            WasteGrade::A => 40,
+            WasteGrade::B => 25,
+            WasteGrade::C => 10,
+            WasteGrade::D => 0,
+        };
+
+        // Subtract points for contamination
+        if waste.is_contaminated {
+            score = score.saturating_sub(waste.contamination_level as u32);
         }
 
-        // Verify verifier is registered and has permission
-        let verifier_key = (verifier.clone(),);
-        let participant: Participant = env
-            .storage()
-            .instance()
-            .get(&verifier_key)
-            .expect("Verifier not registered");
+        // Cap at 100
+        score = score.min(100);
 
-        if !participant.is_registered {
-            panic!("Verifier is not registered");
-        }
+        let quality_score = QualityScore::new(score, env.ledger().timestamp(), scorer);
 
-        if !participant.role.can_process_recyclables() {
-            panic!("Only recyclers can verify materials");
-        }
-
-        // Create verification record
-        let verification_id: u64 = env
-            .storage()
-            .instance()
-            .get(&VERIFICATION_CNT)
-            .unwrap_or(0);
-
-        let mut record = VerificationRecord::new(
-            &env,
-            verification_id,
-            waste_id,
-            verifier.clone(),
-            VERIFICATION_TIMEOUT,
-        );
-
-        record.start_verification().expect("Failed to start verification");
-
-        // Store verification record
+        // Store quality score
         env.storage()
             .instance()
-            .set(&("verification", verification_id), &record);
+            .set(&(QUALITY_SCORES, waste_id), &quality_score);
 
-        // Update counter
-        env.storage()
-            .instance()
-            .set(&VERIFICATION_CNT, &(verification_id + 1));
-
-        // Emit event
-        events::emit_verification_started(&env, waste_id, verification_id, &verifier);
-
-        record
+        Ok(quality_score)
     }
 
-    /// Completes a verification workflow successfully
-    pub fn complete_verification(
-        env: Env,
-        verification_id: u64,
-        quality_score: u32,
-        notes: String,
-    ) -> VerificationRecord {
-        Self::require_not_paused(&env);
+    /// Get quality score for a waste item
+    pub fn get_quality_score(env: Env, waste_id: u128) -> Option<QualityScore> {
+        env.storage()
+            .instance()
+            .get(&(QUALITY_SCORES, waste_id))
+    }
 
-        let mut record: VerificationRecord = env
+    /// Get quality-based waste filtering (returns waste IDs with score >= min_score)
+    pub fn get_wastes_by_quality(env: Env, min_score: u32) -> Vec<u128> {
+        let count: u64 = env
             .storage()
             .instance()
-            .get(&("verification", verification_id))
-            .expect("Verification record not found");
+            .get(&("waste_count",))
+            .unwrap_or(0);
 
-        record
-            .complete_verification(&env, quality_score, notes.clone())
-            .expect("Failed to complete verification");
+        let mut result = Vec::new(&env);
+        for id in 1u128..=(count as u128) {
+            if let Some(score) = env
+                .storage()
+                .instance()
+                .get::<_, QualityScore>(&(QUALITY_SCORES, id))
+            {
+                if score.score >= min_score {
+                    result.push_back(id);
+                }
+            }
+        }
+        result
+    }
 
-        // Update waste as verified
+    // ========================================================================
+    // Issue #655: Waste Location Tracking Functions
+    // ========================================================================
+
+    /// Update waste location and track history
+    pub fn update_waste_location(
+        env: Env,
+        waste_id: u128,
+        latitude: i128,
+        longitude: i128,
+        updater: Address,
+    ) -> Result<(), Error> {
+        updater.require_auth();
+
+        // Validate coordinates
+        if latitude < -90_000_000 || latitude > 90_000_000 {
+            return Err(Error::InvalidCoordinates);
+        }
+        if longitude < -180_000_000 || longitude > 180_000_000 {
+            return Err(Error::InvalidCoordinates);
+        }
+
+        // Get and update waste
         let mut waste: Waste = env
             .storage()
             .instance()
-            .get(&("waste_v2", record.waste_id))
-            .expect("Waste not found");
+            .get(&("waste_v2", waste_id))
+            .ok_or(Error::WasteNotFound)?;
 
-        waste.is_confirmed = true;
-        waste.confirmer = record.verifier.clone();
+        waste.latitude = latitude;
+        waste.longitude = longitude;
 
+        // Store updated waste
         env.storage()
             .instance()
-            .set(&("waste_v2", record.waste_id), &waste);
+            .set(&("waste_v2", waste_id), &waste);
 
-        // Store updated verification record
-        env.storage()
-            .instance()
-            .set(&("verification", verification_id), &record);
+        // Record location history
+        let location = LocationRecord::new(latitude, longitude, env.ledger().timestamp(), updater);
 
-        // Emit event
-        events::emit_verification_completed(&env, record.waste_id, verification_id, quality_score);
-
-        record
-    }
-
-    /// Fails a verification workflow
-    pub fn fail_verification(
-        env: Env,
-        verification_id: u64,
-        reason: String,
-    ) -> VerificationRecord {
-        Self::require_not_paused(&env);
-
-        let mut record: VerificationRecord = env
+        let mut history: Vec<LocationRecord> = env
             .storage()
             .instance()
-            .get(&("verification", verification_id))
-            .expect("Verification record not found");
+            .get(&(LOCATION_HISTORY, waste_id))
+            .unwrap_or_else(|| Vec::new(&env));
 
-        record
-            .fail_verification(&env, reason.clone())
-            .expect("Failed to fail verification");
-
-        // Store updated verification record
+        history.push_back(location);
         env.storage()
             .instance()
-            .set(&("verification", verification_id), &record);
+            .set(&(LOCATION_HISTORY, waste_id), &history);
 
-        // Emit event
-        events::emit_verification_failed(&env, record.waste_id, verification_id);
-
-        record
+        Ok(())
     }
 
-    /// Checks and expires timed-out verifications
-    pub fn expire_verification(env: Env, verification_id: u64) -> VerificationRecord {
-        Self::require_not_paused(&env);
+    /// Get location history for a waste item
+    pub fn get_location_history(env: Env, waste_id: u128) -> Vec<LocationRecord> {
+        env.storage()
+            .instance()
+            .get(&(LOCATION_HISTORY, waste_id))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
 
-        let mut record: VerificationRecord = env
+    // ========================================================================
+    // Issue #656: Waste Batch Tracking Functions
+    // ========================================================================
+
+    /// Create a new waste batch
+    pub fn create_waste_batch(env: Env, creator: Address) -> Result<u64, Error> {
+        creator.require_auth();
+
+        let batch_count: u64 = env
             .storage()
             .instance()
-            .get(&("verification", verification_id))
-            .expect("Verification record not found");
-
-        if !record.is_timed_out(env.ledger().timestamp()) {
-            panic!("Verification has not timed out");
-        }
-
-        record.mark_expired().expect("Failed to mark as expired");
-
-        // Store updated verification record
-        env.storage()
-            .instance()
-            .set(&("verification", verification_id), &record);
-
-        // Emit event
-        events::emit_verification_expired(&env, record.waste_id, verification_id);
-
-        record
-    }
-
-    /// Gets a verification record by ID
-    pub fn get_verification(env: Env, verification_id: u64) -> Option<VerificationRecord> {
-        env.storage()
-            .instance()
-            .get(&("verification", verification_id))
-    }
-
-    /// Gets all verifications for a waste item
-    pub fn get_waste_verifications(env: Env, waste_id: u128) -> Vec<u64> {
-        let mut result = Vec::new(&env);
-        let verification_count: u64 = env
-            .storage()
-            .instance()
-            .get(&VERIFICATION_CNT)
+            .get(&BATCH_COUNT)
             .unwrap_or(0);
 
-        for id in 0..verification_count {
-            if let Some(record) = env
-                .storage()
-                .instance()
-                .get::<_, VerificationRecord>(&("verification", id))
-            {
-                if record.waste_id == waste_id {
-                    result.push_back(id);
-                }
-            }
+        let batch_id = batch_count + 1;
+        let batch = WasteBatch::new(batch_id, creator, env.ledger().timestamp(), &env);
+
+        env.storage()
+            .instance()
+            .set(&(BATCH_INDEX, batch_id), &batch);
+        env.storage().instance().set(&BATCH_COUNT, &batch_id);
+
+        Ok(batch_id)
+    }
+
+    /// Add waste to a batch
+    pub fn add_waste_to_batch(
+        env: Env,
+        batch_id: u64,
+        waste_id: u128,
+        adder: Address,
+    ) -> Result<(), Error> {
+        adder.require_auth();
+
+        let mut batch: WasteBatch = env
+            .storage()
+            .instance()
+            .get(&(BATCH_INDEX, batch_id))
+            .ok_or(Error::InvalidAmount)?;
+
+        // Only allow adding to pending batches
+        if batch.status != BatchStatus::Pending {
+            return Err(Error::InvalidAmount);
         }
 
-        result
+        // Get waste to verify it exists and get weight
+        let waste: Waste = env
+            .storage()
+            .instance()
+            .get(&("waste_v2", waste_id))
+            .ok_or(Error::WasteNotFound)?;
+
+        batch.add_waste(waste_id, waste.weight);
+
+        env.storage()
+            .instance()
+            .set(&(BATCH_INDEX, batch_id), &batch);
+
+        Ok(())
     }
 
-    // ============ Upgrade System Functions (Issue #652) ============
+    /// Get batch details
+    pub fn get_batch(env: Env, batch_id: u64) -> Option<WasteBatch> {
+        env.storage()
+            .instance()
+            .get(&(BATCH_INDEX, batch_id))
+    }
 
-    /// Proposes a contract upgrade
-    pub fn propose_upgrade(
+    /// Mark batch as ready
+    pub fn mark_batch_ready(env: Env, batch_id: u64, marker: Address) -> Result<(), Error> {
+        marker.require_auth();
+
+        let mut batch: WasteBatch = env
+            .storage()
+            .instance()
+            .get(&(BATCH_INDEX, batch_id))
+            .ok_or(Error::InvalidAmount)?;
+
+        if batch.created_by != marker {
+            return Err(Error::Unauthorized);
+        }
+
+        batch.mark_ready();
+        env.storage()
+            .instance()
+            .set(&(BATCH_INDEX, batch_id), &batch);
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // Issue #657: Waste Certification Functions
+    // ========================================================================
+
+    /// Certify a waste item
+    pub fn certify_waste(
         env: Env,
-        new_implementation: Address,
-        description: String,
-    ) -> UpgradeProposal {
-        Self::require_admin(&env);
+        waste_id: u128,
+        level: u32,
+        certifier: Address,
+        expires_at: u64,
+        notes: String,
+    ) -> Result<(), Error> {
+        certifier.require_auth();
 
-        let proposal_id: u64 = env
+        // Validate waste exists
+        let _waste: Waste = env
             .storage()
             .instance()
-            .get(&UPGRADE_PROPOSAL_CNT)
-            .unwrap_or(0);
+            .get(&("waste_v2", waste_id))
+            .ok_or(Error::WasteNotFound)?;
 
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&ADMINS)
-            .expect("Admin not set");
+        // Validate certification level
+        let cert_level = CertificationLevel::from_u32(level).ok_or(Error::InvalidAmount)?;
 
-        let proxy_state: upgrade::ProxyState = env
-            .storage()
-            .instance()
-            .get(&PROXY_STATE)
-            .expect("Proxy state not initialized");
-
-        let proposal = UpgradeProposal::new(
-            &env,
-            proposal_id,
-            new_implementation,
-            description,
-            admin.clone(),
-            proxy_state.version + 1,
-        );
-
-        // Store proposal
-        env.storage()
-            .instance()
-            .set(&("upgrade_proposal", proposal_id), &proposal);
-
-        // Update counter
-        env.storage()
-            .instance()
-            .set(&UPGRADE_PROPOSAL_CNT, &(proposal_id + 1));
-
-        // Emit event
-        events::emit_upgrade_proposed(&env, proposal_id, &proposal.new_implementation);
-
-        proposal
-    }
-
-    /// Approves an upgrade proposal
-    pub fn approve_upgrade(env: Env, proposal_id: u64) -> UpgradeProposal {
-        Self::require_admin(&env);
-
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&ADMINS)
-            .expect("Admin not set");
-
-        let mut proposal: UpgradeProposal = env
-            .storage()
-            .instance()
-            .get(&("upgrade_proposal", proposal_id))
-            .expect("Upgrade proposal not found");
-
-        proposal
-            .approve(&env, admin.clone())
-            .expect("Failed to approve upgrade");
-
-        // Store updated proposal
-        env.storage()
-            .instance()
-            .set(&("upgrade_proposal", proposal_id), &proposal);
-
-        // Emit event
-        events::emit_upgrade_approved(&env, proposal_id);
-
-        proposal
-    }
-
-    /// Executes an approved upgrade
-    pub fn execute_upgrade(env: Env, proposal_id: u64) -> UpgradeProposal {
-        Self::require_admin(&env);
-
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&ADMINS)
-            .expect("Admin not set");
-
-        let mut proposal: UpgradeProposal = env
-            .storage()
-            .instance()
-            .get(&("upgrade_proposal", proposal_id))
-            .expect("Upgrade proposal not found");
-
-        proposal
-            .execute(&env)
-            .expect("Failed to execute upgrade");
-
-        // Get current proxy state
-        let mut proxy_state: upgrade::ProxyState = env
-            .storage()
-            .instance()
-            .get(&PROXY_STATE)
-            .expect("Proxy state not initialized");
-
-        let previous_implementation = proxy_state.current_implementation.clone();
-
-        // Update proxy state
-        proxy_state
-            .update_implementation(&env, proposal.new_implementation.clone(), proposal.version)
-            .expect("Failed to update implementation");
-
-        env.storage()
-            .instance()
-            .set(&PROXY_STATE, &proxy_state);
-
-        // Record upgrade history
-        let history = upgrade::UpgradeHistory::new(
-            &env,
-            proposal.version,
-            previous_implementation,
-            proposal.new_implementation.clone(),
-            admin,
+        let certification = WasteCertification::new(
+            waste_id,
+            cert_level,
+            certifier,
+            env.ledger().timestamp(),
+            expires_at,
+            notes,
         );
 
         env.storage()
             .instance()
-            .set(&("upgrade_history", proposal.version), &history);
+            .set(&(CERTIFICATIONS, waste_id), &certification);
 
-        // Store updated proposal
-        env.storage()
-            .instance()
-            .set(&("upgrade_proposal", proposal_id), &proposal);
-
-        // Emit event
-        events::emit_upgrade_executed(&env, proposal_id, proposal.version);
-
-        proposal
+        Ok(())
     }
 
-    /// Rejects an upgrade proposal
-    pub fn reject_upgrade(env: Env, proposal_id: u64) -> UpgradeProposal {
-        Self::require_admin(&env);
+    /// Get waste certification
+    pub fn get_waste_certification(env: Env, waste_id: u128) -> Option<WasteCertification> {
+        env.storage()
+            .instance()
+            .get(&(CERTIFICATIONS, waste_id))
+    }
 
-        let mut proposal: UpgradeProposal = env
+    /// Check if waste is certified and valid
+    pub fn is_waste_certified(env: Env, waste_id: u128) -> bool {
+        if let Some(cert) = env
             .storage()
             .instance()
-            .get(&("upgrade_proposal", proposal_id))
-            .expect("Upgrade proposal not found");
-
-        proposal.reject().expect("Failed to reject upgrade");
-
-        // Store updated proposal
-        env.storage()
-            .instance()
-            .set(&("upgrade_proposal", proposal_id), &proposal);
-
-        // Emit event
-        events::emit_upgrade_rejected(&env, proposal_id);
-
-        proposal
-    }
-
-    /// Gets an upgrade proposal
-    pub fn get_upgrade_proposal(env: Env, proposal_id: u64) -> Option<UpgradeProposal> {
-        env.storage()
-            .instance()
-            .get(&("upgrade_proposal", proposal_id))
-    }
-
-    /// Gets the current proxy state
-    pub fn get_proxy_state(env: Env) -> Option<upgrade::ProxyState> {
-        env.storage().instance().get(&PROXY_STATE)
-    }
-
-    /// Gets upgrade history for a version
-    pub fn get_upgrade_history(env: Env, version: u32) -> Option<upgrade::UpgradeHistory> {
-        env.storage()
-            .instance()
-            .get(&("upgrade_history", version))
-    }
-
-    // ============ Blockchain Explorer Integration (Issue #651) ============
-
-    /// Initializes explorer configuration
-    pub fn init_explorer_config(
-        env: Env,
-        base_url: String,
-        network: String,
-    ) -> explorer::ExplorerConfig {
-        Self::require_admin(&env);
-
-        let contract_address = env.current_contract_address();
-
-        let config = explorer::ExplorerConfig::new(&env, base_url, network, contract_address);
-
-        env.storage().instance().set(&EXPLORER_CONFIG, &config);
-
-        config
-    }
-
-    /// Tracks a transaction on the blockchain
-    pub fn track_transaction(
-        env: Env,
-        tx_hash: String,
-        tx_type: explorer::TransactionType,
-        initiator: Address,
-        details: String,
-    ) -> explorer::TransactionTracker {
-        let tx_id: u64 = env
-            .storage()
-            .instance()
-            .get(&TRANSACTION_CNT)
-            .unwrap_or(0);
-
-        let mut tracker = explorer::TransactionTracker::new(
-            &env,
-            tx_id,
-            tx_hash,
-            tx_type,
-            initiator,
-            details,
-        );
-
-        // Store transaction tracker
-        env.storage()
-            .instance()
-            .set(&("transaction", tx_id), &tracker);
-
-        // Update counter
-        env.storage()
-            .instance()
-            .set(&TRANSACTION_CNT, &(tx_id + 1));
-
-        // Emit event
-        events::emit_transaction_tracked(&env, tx_id, &tracker.tx_hash);
-
-        tracker
-    }
-
-    /// Updates transaction status
-    pub fn update_transaction_status(
-        env: Env,
-        tx_id: u64,
-        status: explorer::TransactionStatus,
-    ) -> explorer::TransactionTracker {
-        let mut tracker: explorer::TransactionTracker = env
-            .storage()
-            .instance()
-            .get(&("transaction", tx_id))
-            .expect("Transaction not found");
-
-        match status {
-            explorer::TransactionStatus::Confirmed => tracker.confirm(),
-            explorer::TransactionStatus::Failed => tracker.fail(),
-            explorer::TransactionStatus::Reverted => tracker.revert(),
-            _ => {}
-        }
-
-        env.storage()
-            .instance()
-            .set(&("transaction", tx_id), &tracker);
-
-        events::emit_transaction_status_updated(&env, tx_id, status);
-
-        tracker
-    }
-
-    /// Gets a transaction tracker by ID
-    pub fn get_transaction(env: Env, tx_id: u64) -> Option<explorer::TransactionTracker> {
-        env.storage()
-            .instance()
-            .get(&("transaction", tx_id))
-    }
-
-    /// Gets all transactions for a participant
-    pub fn get_participant_transactions(env: Env, participant: Address) -> Vec<u64> {
-        let mut result = Vec::new(&env);
-        let tx_count: u64 = env
-            .storage()
-            .instance()
-            .get(&TRANSACTION_CNT)
-            .unwrap_or(0);
-
-        for id in 0..tx_count {
-            if let Some(tracker) = env
-                .storage()
-                .instance()
-                .get::<_, explorer::TransactionTracker>(&("transaction", id))
-            {
-                if tracker.initiator == participant {
-                    result.push_back(id);
-                }
-            }
-        }
-
-        result
-    }
-
-    /// Gets all transactions for a waste item
-    pub fn get_waste_transactions(env: Env, waste_id: u128) -> Vec<u64> {
-        let mut result = Vec::new(&env);
-        let tx_count: u64 = env
-            .storage()
-            .instance()
-            .get(&TRANSACTION_CNT)
-            .unwrap_or(0);
-
-        for id in 0..tx_count {
-            if let Some(tracker) = env
-                .storage()
-                .instance()
-                .get::<_, explorer::TransactionTracker>(&("transaction", id))
-            {
-                if let Some(w_id) = tracker.waste_id {
-                    if w_id == waste_id {
-                        result.push_back(id);
-                    }
-                }
-            }
-        }
-
-        result
-    }
-
-    /// Gets explorer configuration
-    pub fn get_explorer_config(env: Env) -> Option<explorer::ExplorerConfig> {
-        env.storage().instance().get(&EXPLORER_CONFIG)
-    }
-
-    /// Gets transaction explorer link
-    pub fn get_transaction_explorer_link(env: Env, tx_id: u64) -> Option<String> {
-        let tracker: explorer::TransactionTracker = env
-            .storage()
-            .instance()
-            .get(&("transaction", tx_id))?;
-
-        Some(tracker.explorer_link)
-    }
-
-    // ============ Advanced Analytics System (Issue #650) ============
-
-    /// Creates an analytics report
-    pub fn create_analytics_report(
-        env: Env,
-        report_type: analytics::ReportType,
-        title: String,
-        description: String,
-        period_start: u64,
-        period_end: u64,
-    ) -> analytics::AnalyticsReport {
-        let report_id: u64 = env
-            .storage()
-            .instance()
-            .get(&ANALYTICS_REPORT_CNT)
-            .unwrap_or(0);
-
-        let creator = env.current_contract_address();
-
-        let report = analytics::AnalyticsReport::new(
-            &env,
-            report_id,
-            report_type,
-            title,
-            description,
-            creator,
-            period_start,
-            period_end,
-        );
-
-        // Store report
-        env.storage()
-            .instance()
-            .set(&("analytics_report", report_id), &report);
-
-        // Update counter
-        env.storage()
-            .instance()
-            .set(&ANALYTICS_REPORT_CNT, &(report_id + 1));
-
-        // Emit event
-        events::emit_analytics_report_created(&env, report_id, report_type);
-
-        report
-    }
-
-    /// Adds a data point to an analytics report
-    pub fn add_analytics_data_point(
-        env: Env,
-        report_id: u64,
-        metric: String,
-        value: u128,
-        label: String,
-    ) -> analytics::AnalyticsDataPoint {
-        let data_point = analytics::AnalyticsDataPoint::new(&env, metric, value, label);
-
-        // Store data point
-        let data_key = ("analytics_data", report_id, data_point.timestamp);
-        env.storage().instance().set(&data_key, &data_point);
-
-        // Update report data point count
-        if let Some(mut report) = env
-            .storage()
-            .instance()
-            .get::<_, analytics::AnalyticsReport>(&("analytics_report", report_id))
+            .get::<_, WasteCertification>(&(CERTIFICATIONS, waste_id))
         {
-            report.add_data_point();
-            env.storage()
-                .instance()
-                .set(&("analytics_report", report_id), &report);
+            cert.is_valid(env.ledger().timestamp())
+        } else {
+            false
         }
-
-        data_point
-    }
-
-    /// Gets an analytics report
-    pub fn get_analytics_report(env: Env, report_id: u64) -> Option<analytics::AnalyticsReport> {
-        env.storage()
-            .instance()
-            .get(&("analytics_report", report_id))
-    }
-
-    /// Creates a custom analytics query
-    pub fn create_custom_query(
-        env: Env,
-        name: String,
-        description: String,
-        filters: String,
-        aggregation: analytics::AggregationType,
-    ) -> analytics::CustomQuery {
-        let query_id: u64 = env
-            .storage()
-            .instance()
-            .get(&CUSTOM_QUERY_CNT)
-            .unwrap_or(0);
-
-        let creator = env.current_contract_address();
-
-        let query = analytics::CustomQuery::new(
-            &env,
-            query_id,
-            name,
-            description,
-            creator,
-            filters,
-            aggregation,
-        );
-
-        // Store query
-        env.storage()
-            .instance()
-            .set(&("custom_query", query_id), &query);
-
-        // Update counter
-        env.storage()
-            .instance()
-            .set(&CUSTOM_QUERY_CNT, &(query_id + 1));
-
-        // Emit event
-        events::emit_custom_query_created(&env, query_id);
-
-        query
-    }
-
-    /// Executes a custom query
-    pub fn execute_custom_query(env: Env, query_id: u64) -> analytics::CustomQuery {
-        let mut query: analytics::CustomQuery = env
-            .storage()
-            .instance()
-            .get(&("custom_query", query_id))
-            .expect("Query not found");
-
-        query.execute(&env);
-
-        // Store updated query
-        env.storage()
-            .instance()
-            .set(&("custom_query", query_id), &query);
-
-        // Emit event
-        events::emit_custom_query_executed(&env, query_id);
-
-        query
-    }
-
-    /// Gets a custom query
-    pub fn get_custom_query(env: Env, query_id: u64) -> Option<analytics::CustomQuery> {
-        env.storage()
-            .instance()
-            .get(&("custom_query", query_id))
-    }
-
-    /// Gets all reports of a specific type
-    pub fn get_reports_by_type(
-        env: Env,
-        report_type: analytics::ReportType,
-    ) -> Vec<u64> {
-        let mut result = Vec::new(&env);
-        let report_count: u64 = env
-            .storage()
-            .instance()
-            .get(&ANALYTICS_REPORT_CNT)
-            .unwrap_or(0);
-
-        for id in 0..report_count {
-            if let Some(report) = env
-                .storage()
-                .instance()
-                .get::<_, analytics::AnalyticsReport>(&("analytics_report", id))
-            {
-                if report.report_type == report_type {
-                    result.push_back(id);
-                }
-            }
-        }
-
-        result
-    }
-
-    /// Gets all custom queries
-    pub fn get_all_custom_queries(env: Env) -> Vec<u64> {
-        let mut result = Vec::new(&env);
-        let query_count: u64 = env
-            .storage()
-            .instance()
-            .get(&CUSTOM_QUERY_CNT)
-            .unwrap_or(0);
-
-        for id in 0..query_count {
-            result.push_back(id);
-        }
-
-        result
     }
 }

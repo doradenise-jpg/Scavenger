@@ -2127,3 +2127,242 @@ impl ReputationBadge {
         }
     }
 }
+
+// ============================================================================
+// Issue #654: Waste Quality Scoring
+// ============================================================================
+
+/// Quality score for waste materials (0-100)
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QualityScore {
+    /// Score value (0-100)
+    pub score: u32,
+    /// Timestamp when score was calculated
+    pub calculated_at: u64,
+    /// Address of the scorer
+    pub scorer: Address,
+}
+
+impl QualityScore {
+    /// Creates a new quality score
+    pub fn new(score: u32, calculated_at: u64, scorer: Address) -> Self {
+        Self {
+            score: score.min(100),
+            calculated_at,
+            scorer,
+        }
+    }
+
+    /// Gets quality tier based on score
+    pub fn tier(&self) -> &'static str {
+        match self.score {
+            90..=100 => "EXCELLENT",
+            75..=89 => "GOOD",
+            60..=74 => "ACCEPTABLE",
+            _ => "POOR",
+        }
+    }
+
+    /// Gets reward multiplier based on score (scaled by 100)
+    pub fn reward_multiplier(&self) -> u64 {
+        match self.score {
+            90..=100 => 150, // 1.5x
+            75..=89 => 125,  // 1.25x
+            60..=74 => 100,  // 1.0x
+            _ => 70,         // 0.7x
+        }
+    }
+}
+
+// ============================================================================
+// Issue #655: Waste Location Tracking
+// ============================================================================
+
+/// Location record for waste tracking
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocationRecord {
+    /// Latitude (scaled by 1e6)
+    pub latitude: i128,
+    /// Longitude (scaled by 1e6)
+    pub longitude: i128,
+    /// Timestamp of location update
+    pub timestamp: u64,
+    /// Address that updated the location
+    pub updated_by: Address,
+}
+
+impl LocationRecord {
+    /// Creates a new location record
+    pub fn new(latitude: i128, longitude: i128, timestamp: u64, updated_by: Address) -> Self {
+        Self {
+            latitude,
+            longitude,
+            timestamp,
+            updated_by,
+        }
+    }
+}
+
+// ============================================================================
+// Issue #656: Waste Batch Tracking
+// ============================================================================
+
+/// Batch of waste items for efficient tracking
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WasteBatch {
+    /// Unique batch identifier
+    pub batch_id: u64,
+    /// IDs of waste items in this batch
+    pub waste_ids: soroban_sdk::Vec<u128>,
+    /// Total weight of all items in batch (grams)
+    pub total_weight: u128,
+    /// Batch creator
+    pub created_by: Address,
+    /// Timestamp when batch was created
+    pub created_at: u64,
+    /// Current batch status
+    pub status: BatchStatus,
+}
+
+/// Status of a waste batch
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BatchStatus {
+    /// Batch is being assembled
+    Pending = 0,
+    /// Batch is ready for processing
+    Ready = 1,
+    /// Batch is being processed
+    Processing = 2,
+    /// Batch processing completed
+    Completed = 3,
+    /// Batch was cancelled
+    Cancelled = 4,
+}
+
+impl BatchStatus {
+    /// Converts u32 to BatchStatus
+    pub fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(BatchStatus::Pending),
+            1 => Some(BatchStatus::Ready),
+            2 => Some(BatchStatus::Processing),
+            3 => Some(BatchStatus::Completed),
+            4 => Some(BatchStatus::Cancelled),
+            _ => None,
+        }
+    }
+
+    /// Converts BatchStatus to u32
+    pub fn to_u32(&self) -> u32 {
+        *self as u32
+    }
+
+    /// Returns string representation
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BatchStatus::Pending => "PENDING",
+            BatchStatus::Ready => "READY",
+            BatchStatus::Processing => "PROCESSING",
+            BatchStatus::Completed => "COMPLETED",
+            BatchStatus::Cancelled => "CANCELLED",
+        }
+    }
+}
+
+impl WasteBatch {
+    /// Creates a new waste batch
+    pub fn new(
+        batch_id: u64,
+        created_by: Address,
+        created_at: u64,
+        env: &soroban_sdk::Env,
+    ) -> Self {
+        Self {
+            batch_id,
+            waste_ids: soroban_sdk::Vec::new(env),
+            total_weight: 0,
+            created_by,
+            created_at,
+            status: BatchStatus::Pending,
+        }
+    }
+
+    /// Adds a waste item to the batch
+    pub fn add_waste(&mut self, waste_id: u128, weight: u128) {
+        self.waste_ids.push_back(waste_id);
+        self.total_weight += weight;
+    }
+
+    /// Marks batch as ready
+    pub fn mark_ready(&mut self) {
+        if self.status == BatchStatus::Pending {
+            self.status = BatchStatus::Ready;
+        }
+    }
+
+    /// Marks batch as processing
+    pub fn mark_processing(&mut self) {
+        if self.status == BatchStatus::Ready {
+            self.status = BatchStatus::Processing;
+        }
+    }
+
+    /// Marks batch as completed
+    pub fn mark_completed(&mut self) {
+        if self.status == BatchStatus::Processing {
+            self.status = BatchStatus::Completed;
+        }
+    }
+}
+
+// ============================================================================
+// Issue #657: Waste Certification Levels
+// ============================================================================
+
+/// Certification for waste quality and processing
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WasteCertification {
+    /// Waste item ID
+    pub waste_id: u128,
+    /// Certification level
+    pub level: CertificationLevel,
+    /// Certifier address
+    pub certifier: Address,
+    /// Timestamp of certification
+    pub certified_at: u64,
+    /// Expiry timestamp (0 = no expiry)
+    pub expires_at: u64,
+    /// Certification notes
+    pub notes: soroban_sdk::String,
+}
+
+impl WasteCertification {
+    /// Creates a new waste certification
+    pub fn new(
+        waste_id: u128,
+        level: CertificationLevel,
+        certifier: Address,
+        certified_at: u64,
+        expires_at: u64,
+        notes: soroban_sdk::String,
+    ) -> Self {
+        Self {
+            waste_id,
+            level,
+            certifier,
+            certified_at,
+            expires_at,
+            notes,
+        }
+    }
+
+    /// Checks if certification is still valid
+    pub fn is_valid(&self, current_time: u64) -> bool {
+        self.expires_at == 0 || current_time < self.expires_at
+    }
+}
