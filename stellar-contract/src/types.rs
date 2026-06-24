@@ -786,6 +786,8 @@ pub struct Waste {
     pub processing_status: ProcessingStatus,
     /// Processing history
     pub processing_history: soroban_sdk::Vec<ProcessingRecord>,
+    /// Substitution history
+    pub substitution_history: soroban_sdk::Vec<SubstitutionRecord>,
     /// Unique tracking code for QR codes
     pub tracking_code: soroban_sdk::String,
     /// Processing cost in tokens (set by owner)
@@ -845,6 +847,7 @@ impl Waste {
             contamination_reason: soroban_sdk::String::from_str(env, ""),
             processing_status: ProcessingStatus::Collected,
             processing_history: history,
+            substitution_history: soroban_sdk::Vec::new(env),
             tracking_code,
             processing_cost: 0,
             composition: soroban_sdk::Vec::new(env),
@@ -1004,6 +1007,105 @@ pub struct CarbonListing {
     pub created_at: u64,
 }
 
+/// Represents a period for compliance reporting
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReportPeriod {
+    pub start_timestamp: u64,
+    pub end_timestamp: u64,
+}
+
+/// Status of regulatory validation
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ComplianceStatus {
+    Pending = 0,
+    Compliant = 1,
+    NonCompliant = 2,
+    Exempt = 3,
+}
+
+/// Regulatory requirement validation result
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RegulatoryValidation {
+    pub requirement_id: String,
+    pub status: ComplianceStatus,
+    pub notes: String,
+}
+
+/// Represents a compliance report for environmental regulations
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ComplianceReport {
+    pub id: u64,
+    pub period: ReportPeriod,
+    pub total_waste_tracked: u128,
+    pub waste_by_type: soroban_sdk::Vec<(WasteType, u128)>,
+    pub total_carbon_credits: u128,
+    pub validations: soroban_sdk::Vec<RegulatoryValidation>,
+    pub generated_at: u64,
+    pub version: u32,
+    pub is_finalized: bool,
+}
+
+/// Status of a multi-signature transfer approval
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransferApprovalStatus {
+    Pending = 0,
+    Approved = 1,
+    Rejected = 2,
+    Expired = 3,
+}
+
+/// Represents a multi-signature approval for high-value transfers
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransferApproval {
+    pub waste_id: u128,
+    pub from: Address,
+    pub to: Address,
+    pub amount: u128,
+    pub approvers: soroban_sdk::Vec<Address>,
+    pub required_approvals: u32,
+    pub status: TransferApprovalStatus,
+    pub created_at: u64,
+    pub expires_at: u64,
+}
+
+/// Represents a substitution of one waste item for another
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubstitutionRecord {
+    pub original_id: u128,
+    pub substitute_id: u128,
+    pub approver: Address,
+    pub reason: String,
+    pub timestamp: u64,
+}
+
+/// Statistics for contract transactions
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransactionStats {
+    pub total_transactions: u64,
+    pub successful_transactions: u64,
+    pub failed_transactions: u64,
+    pub average_gas_usage: u64,
+    pub last_transaction_timestamp: u64,
+}
+
+/// A snapshot of contract performance at a point in time
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PerformanceSnapshot {
+    pub timestamp: u64,
+    pub active_users: u32,
+    pub waste_processed_per_hour: u128,
+    pub average_latency_ms: u32,
+}
+
 /// Transfer record for waste movement across the supply chain.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1152,6 +1254,7 @@ impl WasteBuilder {
             contamination_reason: soroban_sdk::String::from_str(env, ""),
             processing_status: ProcessingStatus::Collected,
             processing_history: history,
+            substitution_history: soroban_sdk::Vec::new(env),
             tracking_code: soroban_sdk::String::from_str(env, "WS-TRACK"),
             processing_cost: 0,
             composition: soroban_sdk::Vec::new(env),
