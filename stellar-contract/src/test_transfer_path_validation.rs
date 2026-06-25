@@ -486,3 +486,105 @@ fn test_deregistered_both_is_registered_false() {
     client.deregister_participant(&collector);
     assert!(!client.is_valid_transfer(&recycler, &collector));
 }
+
+// ─── validate_transfer_path — success ───────────────────────────────────────
+
+#[test]
+fn test_validate_transfer_path_succeeds_for_valid_route() {
+    let (env, client) = setup();
+    let recycler = register(&client, &env, ParticipantRole::Recycler);
+    let collector = register(&client, &env, ParticipantRole::Collector);
+    let waste_id = create_waste(&client, &recycler);
+
+    let result = client.try_validate_transfer_path(&waste_id, &recycler, &collector);
+    assert!(result.is_ok());
+}
+
+// ─── validate_transfer_path — errors ────────────────────────────────────────
+
+#[test]
+fn test_validate_transfer_path_fails_for_waste_not_found() {
+    let (env, client) = setup();
+    let recycler = register(&client, &env, ParticipantRole::Recycler);
+    let collector = register(&client, &env, ParticipantRole::Collector);
+
+    let result = client.try_validate_transfer_path(&999_999, &recycler, &collector);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_validate_transfer_path_fails_for_same_addresses() {
+    let (env, client) = setup();
+    let recycler = register(&client, &env, ParticipantRole::Recycler);
+    let waste_id = create_waste(&client, &recycler);
+
+    let result = client.try_validate_transfer_path(&waste_id, &recycler, &recycler);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_validate_transfer_path_fails_for_circular_transfer() {
+    let (env, client) = setup();
+    let recycler = register(&client, &env, ParticipantRole::Recycler);
+    let waste_id = create_waste(&client, &recycler);
+
+    // Transfer to collector first
+    let collector = register(&client, &env, ParticipantRole::Collector);
+    client.transfer_waste_v2(&waste_id, &recycler, &collector, &0, &0);
+
+    // Now waste is owned by collector — trying to validate recycler -> collector fails
+    let result = client.try_validate_transfer_path(&waste_id, &recycler, &collector);
+    assert!(result.is_err());
+}
+
+// ─── admin_override_transfer ─────────────────────────────────────────────────
+
+#[test]
+fn test_admin_override_transfer_bypasses_route_check() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize_admin(&admin);
+
+    let recycler = register(&client, &env, ParticipantRole::Recycler);
+    let collector = register(&client, &env, ParticipantRole::Collector);
+    let waste_id = create_waste(&client, &recycler);
+
+    // Admin overrides transfer: recycler → collector (valid route but via override)
+    let result = client.try_admin_override_transfer(&admin, &waste_id, &recycler, &collector, &0, &0);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_admin_override_transfer_fails_for_non_admin() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize_admin(&admin);
+
+    let recycler = register(&client, &env, ParticipantRole::Recycler);
+    let fake_admin = Address::generate(&env);
+    let waste_id = create_waste(&client, &recycler);
+
+    let result = client.try_admin_override_transfer(&fake_admin, &waste_id, &recycler, &recycler, &0, &0);
+    assert!(result.is_err());
+}
+
+// ─── get_transfer_path_data ─────────────────────────────────────────────────
+
+#[test]
+fn test_get_transfer_path_data_returns_transfer_history() {
+    let (env, client) = setup();
+    let recycler = register(&client, &env, ParticipantRole::Recycler);
+    let collector = register(&client, &env, ParticipantRole::Collector);
+    let waste_id = create_waste(&client, &recycler);
+
+    // No transfers yet
+    let data = client.get_transfer_path_data(&waste_id);
+    assert_eq!(data.len(), 0);
+
+    // After transfer, history should have 1 entry
+    client.transfer_waste_v2(&waste_id, &recycler, &collector, &0, &0);
+    let data = client.get_transfer_path_data(&waste_id);
+    assert_eq!(data.len(), 1);
+    assert_eq!(data.get(0).unwrap().from, recycler);
+    assert_eq!(data.get(0).unwrap().to, collector);
+}

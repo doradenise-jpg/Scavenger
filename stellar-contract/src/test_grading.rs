@@ -449,3 +449,115 @@ fn test_grade_multiplier_applied_in_reward_pipeline() {
     assert_eq!(reward_c, 200); // 200 * 100 / 100
     assert_eq!(reward_d, 140); // 200 * 70  / 100
 }
+
+// ─── Grading analytics ──────────────────────────────────────────────────────
+
+#[test]
+fn test_get_grading_analytics_returns_all_grade_counts() {
+    let (env, client) = setup_with_admin();
+    let recycler = register(&client, &env, ParticipantRole::Recycler);
+    let collector = register(&client, &env, ParticipantRole::Collector);
+
+    let waste_a = client.recycle_waste(&WasteType::Paper, &1_000, &recycler, &0, &0);
+    let waste_b = client.recycle_waste(&WasteType::Metal, &2_000, &recycler, &0, &0);
+    let waste_c = client.recycle_waste(&WasteType::Glass, &3_000, &recycler, &0, &0);
+
+    client.set_waste_grade(&waste_a, &WasteGrade::A, &collector);
+    client.set_waste_grade(&waste_b, &WasteGrade::B, &collector);
+    // waste_c remains Grade C (default)
+
+    let (a, b, c, d) = client.get_grading_analytics();
+    assert_eq!(a, 1);
+    assert_eq!(b, 1);
+    assert_eq!(c, 1); // waste_c is still C
+    assert_eq!(d, 0);
+}
+
+// ─── AI verification confidence ─────────────────────────────────────────────
+
+#[test]
+fn test_set_ai_verified_grade_stores_confidence() {
+    let (env, client) = setup_with_admin();
+    let recycler = register(&client, &env, ParticipantRole::Recycler);
+    let collector = register(&client, &env, ParticipantRole::Collector);
+
+    let waste_id = client.recycle_waste(&WasteType::Plastic, &1_000, &recycler, &0, &0);
+    client.set_waste_grade_ai_verified(&waste_id, &WasteGrade::A, &collector, &95);
+
+    let confidence = client.get_ai_grade_confidence(&waste_id);
+    assert_eq!(confidence, Some(95));
+}
+
+#[test]
+fn test_ai_grade_confidence_is_none_for_regular_grades() {
+    let (env, client) = setup_with_admin();
+    let recycler = register(&client, &env, ParticipantRole::Recycler);
+    let collector = register(&client, &env, ParticipantRole::Collector);
+
+    let waste_id = client.recycle_waste(&WasteType::Plastic, &1_000, &recycler, &0, &0);
+    client.set_waste_grade(&waste_id, &WasteGrade::B, &collector);
+
+    let confidence = client.get_ai_grade_confidence(&waste_id);
+    assert_eq!(confidence, None);
+}
+
+#[test]
+fn test_ai_confidence_capped_at_100() {
+    let (env, client) = setup_with_admin();
+    let recycler = register(&client, &env, ParticipantRole::Recycler);
+    let collector = register(&client, &env, ParticipantRole::Collector);
+
+    let waste_id = client.recycle_waste(&WasteType::Plastic, &1_000, &recycler, &0, &0);
+    client.set_waste_grade_ai_verified(&waste_id, &WasteGrade::B, &collector, &150);
+
+    let confidence = client.get_ai_grade_confidence(&waste_id);
+    assert_eq!(confidence, Some(100));
+}
+
+// ─── Global metrics includes grade counts ───────────────────────────────────
+
+#[test]
+fn test_get_metrics_includes_grade_breakdown() {
+    let (env, client) = setup_with_admin();
+    let recycler = register(&client, &env, ParticipantRole::Recycler);
+    let collector = register(&client, &env, ParticipantRole::Collector);
+
+    let w1 = client.recycle_waste(&WasteType::Paper, &1_000, &recycler, &0, &0);
+    let w2 = client.recycle_waste(&WasteType::Metal, &2_000, &recycler, &0, &0);
+    let w3 = client.recycle_waste(&WasteType::Glass, &3_000, &recycler, &0, &0);
+    let w4 = client.recycle_waste(&WasteType::Plastic, &4_000, &recycler, &0, &0);
+
+    client.set_waste_grade(&w1, &WasteGrade::A, &collector);
+    client.set_waste_grade(&w2, &WasteGrade::B, &collector);
+    client.set_waste_grade(&w3, &WasteGrade::D, &collector);
+    // w4 stays C
+
+    let metrics = client.get_metrics();
+    assert_eq!(metrics.grade_a_count, 1);
+    assert_eq!(metrics.grade_b_count, 1);
+    assert_eq!(metrics.grade_c_count, 1);
+    assert_eq!(metrics.grade_d_count, 1);
+}
+
+// ─── Grade acceptability matrix ─────────────────────────────────────────────
+
+#[test]
+fn test_grade_is_acceptable_for_each_waste_type() {
+    // Electronic: only A and B acceptable
+    assert!(WasteType::Electronic.grade_is_acceptable(WasteGrade::A));
+    assert!(WasteType::Electronic.grade_is_acceptable(WasteGrade::B));
+    assert!(!WasteType::Electronic.grade_is_acceptable(WasteGrade::C));
+    assert!(!WasteType::Electronic.grade_is_acceptable(WasteGrade::D));
+
+    // Metal: A, B, C acceptable
+    assert!(WasteType::Metal.grade_is_acceptable(WasteGrade::A));
+    assert!(WasteType::Metal.grade_is_acceptable(WasteGrade::B));
+    assert!(WasteType::Metal.grade_is_acceptable(WasteGrade::C));
+    assert!(!WasteType::Metal.grade_is_acceptable(WasteGrade::D));
+
+    // Paper: all grades acceptable
+    assert!(WasteType::Paper.grade_is_acceptable(WasteGrade::A));
+    assert!(WasteType::Paper.grade_is_acceptable(WasteGrade::B));
+    assert!(WasteType::Paper.grade_is_acceptable(WasteGrade::C));
+    assert!(WasteType::Paper.grade_is_acceptable(WasteGrade::D));
+}

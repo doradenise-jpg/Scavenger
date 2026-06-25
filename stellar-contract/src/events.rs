@@ -347,3 +347,64 @@ pub fn emit_custom_query_executed(env: &Env, query_id: u64) {
     env.events()
         .publish((symbol_short!("qry_exe"), query_id), ());
 }
+
+// ============ Material Composition Events ============
+
+pub fn emit_composition_set(
+    env: &Env,
+    waste_id: u128,
+    verifier: &Address,
+    entries: u32,
+) {
+    env.events()
+        .publish((symbol_short!("comp_set"), waste_id), (verifier, entries));
+}
+
+// ============ Transfer Path Validation Events ============
+
+pub fn emit_transfer_validation(
+    env: &Env,
+    waste_id: u128,
+    from: &Address,
+    to: &Address,
+    valid: bool,
+    reason: &soroban_sdk::Symbol,
+) {
+    env.events()
+        .publish((symbol_short!("xfer_val"), waste_id), (from, to, valid, reason));
+}
+
+pub fn emit_admin_override_transfer(
+    env: &Env,
+    waste_id: u128,
+    admin: &Address,
+    from: &Address,
+    to: &Address,
+) {
+    env.events()
+        .publish((symbol_short!("adm_xfr"), waste_id), (admin, from, to));
+}
+
+// ============ Approaching Expiration Events ============
+
+pub fn emit_approaching_expiry_90(env: &Env, waste_id: u128, expires_at: u64) {
+    env.events()
+        .publish((symbol_short!("exp_90"), waste_id), expires_at);
+}
+
+pub fn emit_approaching_expiry_60(env: &Env, waste_id: u128, expires_at: u64) {
+    env.events()
+        .publish((symbol_short!("exp_60"), waste_id), expires_at);
+}
+
+pub fn emit_approaching_expiry_30(env: &Env, waste_id: u128, expires_at: u64) {
+    env.events()
+        .publish((symbol_short!("exp_30"), waste_id), expires_at);
+}
+
+// ============ Grading Analytics Events ============
+
+pub fn emit_grading_analytics_updated(env: &Env, waste_id: u128, grade: u32) {
+    env.events()
+        .publish((symbol_short!("grade_ana"), waste_id), grade);
+}
