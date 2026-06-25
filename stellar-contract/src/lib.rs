@@ -15,13 +15,12 @@ mod analytics;
 pub use errors::Error;
 pub use types::{
     Auction, BatchStatus, CarbonListing, CertificationLevel, Challenge, ChallengeProgress,
-    ChallengeStatus, CollectionRoute, CompositionEntry, ContaminationReport, Dispute,
-    DisputeStatus, ExpirationWarning, GlobalMetrics, GradeRecord, Incentive, LeaderboardEntry,
-    LocationRecord, Material, MaterialComposition, Milestone, OptionalWasteType, ParticipantRole,
-    PendingTransfer, PendingTransferStatus, ProcessingRecord, ProcessingStatus, QualityScore,
-    RecyclingGoal, RecyclingStats, ReputationBadge, RouteStatus, SeasonalMultiplier,
-    TransferItemType, TransferRecord, TransferStatus, TransferValidationRecord, Waste,
-    WasteBatch, WasteCertification, WasteGrade, WasteTransfer, WasteType,
+    ChallengeStatus, CollectionRoute, ContaminationReport, Dispute, DisputeStatus, GlobalMetrics,
+    GradeRecord, Incentive, LeaderboardEntry, LocationRecord, Material, MaterialComposition,
+    Milestone, OptionalWasteType, ParticipantRole, ParticipantTier, PendingTransfer, PendingTransferStatus,
+    ProcessingRecord, ProcessingStatus, QualityScore, RecyclingGoal, RecyclingStats,
+    ReputationBadge, RouteStatus, SeasonalMultiplier, TransferItemType, TransferRecord,
+    TransferStatus, Waste, WasteBatch, WasteCertification, WasteGrade, WasteTransfer, WasteType,
 };
 pub use types::calculate_carbon_credits;
 pub use verification::{VerificationRecord, VerificationState, VerificationWorkflow};
@@ -190,6 +189,8 @@ pub struct Participant {
     pub last_active_at: u64,
     /// Certification level based on activity and accuracy
     pub certification: CertificationLevel,
+    /// Participant tier (Bronze, Silver, Gold, Platinum)
+    pub tier: ParticipantTier,
 }
 
 /// Combined view of a participant and their recycling statistics.
@@ -898,6 +899,7 @@ impl ScavengerContract {
             reputation_score: 0,
             last_active_at: env.ledger().timestamp(),
             certification: CertificationLevel::Beginner,
+            tier: ParticipantTier::Bronze,
         };
 
         // Store participant using helper function
@@ -952,11 +954,20 @@ impl ScavengerContract {
             let old_certification = participant.certification;
             participant.certification = CertificationLevel::from_waste_count(participant.total_waste_processed);
 
+            // Update tier based on total waste processed
+            let old_tier = participant.tier;
+            participant.tier = ParticipantTier::from_total_waste(participant.total_waste_processed);
+
             env.storage().instance().set(&key, &participant);
 
             // Emit certification granted event if level upgraded
             if participant.certification != old_certification {
                 events::emit_certification_granted(env, address, participant.certification);
+            }
+
+            // Emit tier change event if tier changed
+            if participant.tier != old_tier {
+                events::emit_participant_tier_changed(env, address, old_tier, participant.tier);
             }
 
             // Update global total tokens if tokens were earned
@@ -993,8 +1004,9 @@ impl ScavengerContract {
             if let Some(p) = participant {
                 if matches!(p.role, ParticipantRole::Collector) {
                     let base_share = collector_share;
-                    let multiplier = p.certification.reward_multiplier() as u128;
-                    let share = (base_share * multiplier) / 100;
+                    let cert_multiplier = p.certification.reward_multiplier() as u128;
+                    let tier_multiplier = p.tier.reward_multiplier() as u128;
+                    let share = (base_share * cert_multiplier * tier_multiplier) / 10000; // Divide by 100*100
                     total_distributed += share;
                     Self::update_participant_stats(env, &transfer.to, 0, share as u64);
                     events::emit_tokens_rewarded(env, &transfer.to, share, waste_id);
@@ -1011,8 +1023,9 @@ impl ScavengerContract {
             if submitter_total > 0 {
                 let key = (material.submitter.clone(),);
                 if let Some(participant) = env.storage().instance().get::<_, Participant>(&key) {
-                    let multiplier = participant.certification.reward_multiplier() as u128;
-                    let adjusted_total = (submitter_total * multiplier) / 100;
+                    let cert_multiplier = participant.certification.reward_multiplier() as u128;
+                    let tier_multiplier = participant.tier.reward_multiplier() as u128;
+                    let adjusted_total = (submitter_total * cert_multiplier * tier_multiplier) / 10000;
 
                     let mut participant = participant; // make mutable
                     participant.total_tokens_earned = participant
@@ -1025,8 +1038,8 @@ impl ScavengerContract {
                     Self::add_to_total_tokens(env, adjusted_total);
 
                     // Emit two events to preserve existing behaviour / test expectations
-                    let adjusted_owner_share = (owner_share * multiplier) / 100;
-                    let adjusted_recycler_amount = (recycler_amount * multiplier) / 100;
+                    let adjusted_owner_share = (owner_share * cert_multiplier * tier_multiplier) / 10000;
+                    let adjusted_recycler_amount = (recycler_amount * cert_multiplier * tier_multiplier) / 10000;
                     events::emit_tokens_rewarded(env, &material.submitter, adjusted_owner_share, waste_id);
                     if adjusted_recycler_amount > 0 {
                         events::emit_tokens_rewarded(
@@ -7274,6 +7287,72 @@ impl ScavengerContract {
         env.storage()
             .instance()
             .set(&(BATCH_INDEX, batch_id), &batch);
+
+        Ok(())
+    }
+
+    /// Process a waste batch
+    pub fn process_batch(
+        env: Env,
+        batch_id: u64,
+        processor: Address,
+        note: String,
+    ) -> Result<(), Error> {
+        processor.require_auth();
+        Self::require_not_paused(&env);
+        Self::only_manufacturer(&env, &processor);
+
+        let mut batch: WasteBatch = env
+            .storage()
+            .instance()
+            .get(&(BATCH_INDEX, batch_id))
+            .ok_or(Error::InvalidAmount)?;
+
+        // Only allow processing ready batches
+        if batch.status != BatchStatus::Ready {
+            return Err(Error::InvalidAmount);
+        }
+
+        // Mark batch as processing
+        batch.mark_processing();
+        env.storage()
+            .instance()
+            .set(&(BATCH_INDEX, batch_id), &batch);
+
+        // Process each waste item in the batch
+        for waste_id in batch.waste_ids.iter() {
+            // Update processing status of each waste item
+            let mut waste: Waste = env
+                .storage()
+                .instance()
+                .get(&("waste_v2", waste_id))
+                .ok_or(Error::WasteNotFound)?;
+
+            // Mark as processed (update processing status)
+            let processing_record = ProcessingRecord {
+                status: ProcessingStatus::Processed,
+                timestamp: env.ledger().timestamp(),
+                updated_by: processor.clone(),
+            };
+            waste.processing_history.push_back(processing_record);
+            waste.processing_status = ProcessingStatus::Processed;
+
+            env.storage()
+                .instance()
+                .set(&("waste_v2", waste_id), &waste);
+
+            // Update participant stats for the current owner
+            Self::update_participant_stats(&env, &waste.current_owner, waste.weight as u64, 0);
+        }
+
+        // Mark batch as completed
+        batch.mark_completed();
+        env.storage()
+            .instance()
+            .set(&(BATCH_INDEX, batch_id), &batch);
+
+        // Emit batch processed event
+        events::emit_batch_processed(&env, batch_id, &processor, &note);
 
         Ok(())
     }

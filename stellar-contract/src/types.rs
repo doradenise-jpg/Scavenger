@@ -531,6 +531,19 @@ impl WasteType {
         }
     }
 
+    /// Returns the impact score multiplier per gram for this waste type
+    pub fn impact_score_multiplier(&self) -> u128 {
+        match self {
+            WasteType::Paper => 10,
+            WasteType::PetPlastic => 30,
+            WasteType::Plastic => 25,
+            WasteType::Metal => 40,
+            WasteType::Glass => 15,
+            WasteType::Organic => 5,
+            WasteType::Electronic => 50,
+        }
+    }
+
     /// Checks if the waste type is recyclable plastic
     pub fn is_plastic(&self) -> bool {
         matches!(self, WasteType::PetPlastic | WasteType::Plastic)
@@ -571,6 +584,28 @@ pub struct Material {
     pub verified: bool,
     /// Optional description of the material
     pub description: String,
+}
+
+/// Environmental impact score for a waste item
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImpactScore {
+    /// Total impact score (based on waste type and weight)
+    pub score: u128,
+    /// Timestamp when score was calculated
+    pub calculated_at: u64,
+}
+
+/// History of impact scores for a participant
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImpactHistoryEntry {
+    /// Waste ID
+    pub waste_id: u128,
+    /// Impact score for this waste
+    pub score: u128,
+    /// Timestamp when the score was recorded
+    pub recorded_at: u64,
 }
 
 impl Material {
@@ -792,6 +827,8 @@ pub struct Waste {
     pub processing_cost: u128,
     /// Material composition breakdown (percentages summing to 100)
     pub composition: soroban_sdk::Vec<MaterialComposition>,
+    /// Environmental impact score for this waste item
+    pub impact_score: u128,
 }
 
 impl Waste {
@@ -821,6 +858,8 @@ impl Waste {
 
         let tracking_code = soroban_sdk::String::from_str(env, "WS-TRACK");
 
+        let impact_score = calculate_impact_score(waste_type, weight);
+
         Self {
             waste_id,
             waste_type,
@@ -848,6 +887,7 @@ impl Waste {
             tracking_code,
             processing_cost: 0,
             composition: soroban_sdk::Vec::new(env),
+            impact_score,
         }
     }
     pub fn is_expired(&self, now: u64) -> bool {
@@ -1175,6 +1215,8 @@ pub struct RecyclingStats {
     pub total_points: u64,
     /// Total carbon credits earned (grams of CO2 equivalent)
     pub carbon_credits_earned: u128,
+    /// Total environmental impact score
+    pub total_impact_score: u128,
     /// Number of materials by waste type
     pub paper_count: u64,
     pub pet_plastic_count: u64,
@@ -1207,6 +1249,7 @@ impl RecyclingStats {
             total_weight: 0,
             total_points: 0,
             carbon_credits_earned: 0,
+            total_impact_score: 0,
             paper_count: 0,
             pet_plastic_count: 0,
             plastic_count: 0,
@@ -1322,6 +1365,12 @@ impl RecyclingStats {
 /// Formula: credits = weight_grams * rate_milli / 1000
 pub fn calculate_carbon_credits(waste_type: WasteType, weight_grams: u128) -> u128 {
     weight_grams * waste_type.carbon_credit_rate_milli() / 1000
+}
+
+/// Calculate environmental impact score for a given waste type and weight in grams.
+/// Formula: score = weight_grams * impact_score_multiplier
+pub fn calculate_impact_score(waste_type: WasteType, weight_grams: u128) -> u128 {
+    weight_grams * waste_type.impact_score_multiplier()
 }
 
 #[cfg(test)]
@@ -2130,6 +2179,47 @@ pub struct Dispute {
     pub created_at: u64,
     pub resolved_at: u64,
     pub resolution_note: soroban_sdk::String,
+}
+
+// ========== Participant Tier System (issue #696) ==========
+
+/// Participant tier based on total waste processed, reputation, and consistency.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ParticipantTier {
+    /// Less than 100,000 grams processed
+    Bronze = 0,
+    /// 100,000 to 499,999 grams processed
+    Silver = 1,
+    /// 500,000 to 1,999,999 grams processed
+    Gold = 2,
+    /// 2,000,000+ grams processed
+    Platinum = 3,
+}
+
+impl ParticipantTier {
+    /// Calculates the participant tier based on total waste processed (in grams).
+    pub fn from_total_waste(total_waste: u128) -> Self {
+        if total_waste >= 2_000_000 {
+            ParticipantTier::Platinum
+        } else if total_waste >= 500_000 {
+            ParticipantTier::Gold
+        } else if total_waste >= 100_000 {
+            ParticipantTier::Silver
+        } else {
+            ParticipantTier::Bronze
+        }
+    }
+
+    /// Gets the reward multiplier for this tier (scaled by 100).
+    pub fn reward_multiplier(&self) -> u64 {
+        match self {
+            ParticipantTier::Bronze => 100,   // 1.0x
+            ParticipantTier::Silver => 110,   // 1.1x
+            ParticipantTier::Gold => 125,     // 1.25x
+            ParticipantTier::Platinum => 150, // 1.5x
+        }
+    }
 }
 
 // ========== Reputation System Types (issue #551) ==========
