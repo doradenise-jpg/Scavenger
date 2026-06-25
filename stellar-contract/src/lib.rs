@@ -16,13 +16,13 @@ mod audit_log;
 pub use errors::Error;
 pub use types::{
     Auction, BatchStatus, CarbonListing, CertificationLevel, Challenge, ChallengeProgress,
-    ChallengeStatus, CollectionRoute, ComplianceReport, ComplianceStatus, ContaminationReport,
-    Dispute, DisputeStatus, GlobalMetrics, GradeRecord, Incentive, LeaderboardEntry,
-    LocationRecord, Material, MaterialComposition, Milestone, OptionalWasteType, ParticipantRole, PendingTransfer, PendingTransferStatus,
-    PerformanceSnapshot, ProcessingRecord, ProcessingStatus, QualityScore, RecyclingGoal,
-    RecyclingStats, ReportPeriod, ReputationBadge, RegulatoryValidation, RouteStatus,
-    SeasonalMultiplier, SubstitutionRecord, TransactionStats, TransferItemType, TransferRecord,
-    TransferStatus, TransferApproval, TransferApprovalStatus, Waste, WasteBatch, WasteCertification, WasteGrade, WasteTransfer, WasteType,
+    ChallengeStatus, CollectionRoute, ContaminationReport, Dispute, DisputeStatus, GlobalMetrics,
+    GradeRecord, Incentive, LeaderboardEntry, LocationRecord, Material, MaterialComposition,
+    Milestone, OptionalWasteType, ParticipantRole, PendingTransfer, PendingTransferStatus,
+    PermissionAuditEntry, PermissionType, ProcessingRecord, ProcessingStatus, QualityScore,
+    ReconciliationRecord, RecyclingGoal, RecyclingStats, ReputationBadge, RouteStatus,
+    SeasonalMultiplier, TransferItemType, TransferRecord, TransferStatus, Waste, WasteBatch,
+    WasteCertification, WasteGrade, WasteTransfer, WasteType,
 };
 pub use types::calculate_carbon_credits;
 pub use verification::{VerificationRecord, VerificationState, VerificationWorkflow};
@@ -68,6 +68,12 @@ const DISPUTE_CNT: Symbol = symbol_short!("DISP_CNT");
 
 // Collection route counters (issue #552)
 const ROUTE_CNT: Symbol = symbol_short!("ROUTE_CNT");
+
+// Issue #704: RBAC permission storage key prefix
+const PERMISSIONS: Symbol = symbol_short!("PERMS");
+
+// Issue #706: Reconciliation audit trail storage key prefix
+const RECONCIL_LOG: Symbol = symbol_short!("REC_LOG");
 
 // Issue #654: Quality Scoring storage keys
 const QUALITY_SCORES: Symbol = symbol_short!("QUAL_SC");
@@ -7793,5 +7799,278 @@ impl ScavengerContract {
         } else {
             false
         }
+    }
+
+    // ========================================================================
+    // Issue #704: RBAC — Grant / Revoke / Check permissions
+    // ========================================================================
+
+    /// Internal helper: returns Err(Unauthorized) if `caller` is not an admin.
+    fn check_admin(env: &Env, caller: &Address) -> Result<(), Error> {
+        let admins: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&ADMINS)
+            .expect("Admin not set");
+        if !admins.contains(caller) {
+            return Err(Error::Unauthorized);
+        }
+        Ok(())
+    }
+
+    /// Grant a granular permission to a participant (admin only).
+    ///
+    /// Stores an entry under `(PERMISSIONS, subject, permission_u32)` and appends
+    /// to the per-subject audit trail. Emits a `perm_gr` event.
+    ///
+    /// # Errors
+    /// - [`Error::Unauthorized`] if `admin` is not the contract admin.
+    /// - [`Error::InvalidPermission`] if `permission` is not a valid [`PermissionType`] value.
+    pub fn grant_permission(
+        env: Env,
+        admin: Address,
+        subject: Address,
+        permission: u32,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        Self::check_admin(&env, &admin)?;
+
+        // Validate permission value
+        if PermissionType::from_u32(permission).is_none() {
+            return Err(Error::InvalidPermission);
+        }
+
+        // Store the grant flag
+        env.storage()
+            .instance()
+            .set(&(PERMISSIONS, subject.clone(), permission), &true);
+
+        // Append to audit trail
+        let mut trail: Vec<PermissionAuditEntry> = env
+            .storage()
+            .instance()
+            .get(&(PERMISSIONS, subject.clone()))
+            .unwrap_or(Vec::new(&env));
+
+        trail.push_back(PermissionAuditEntry {
+            subject: subject.clone(),
+            permission: PermissionType::from_u32(permission).unwrap(),
+            granted: true,
+            changed_by: admin.clone(),
+            timestamp: env.ledger().timestamp(),
+        });
+        env.storage()
+            .instance()
+            .set(&(PERMISSIONS, subject.clone()), &trail);
+
+        events::emit_permission_granted(&env, &subject, permission, &admin);
+        Ok(())
+    }
+
+    /// Revoke a granular permission from a participant (admin only).
+    ///
+    /// Removes the grant flag and appends a revocation entry to the audit trail.
+    /// Emits a `perm_rv` event.
+    ///
+    /// # Errors
+    /// - [`Error::Unauthorized`] if `admin` is not the contract admin.
+    /// - [`Error::InvalidPermission`] if `permission` is not a valid [`PermissionType`] value.
+    pub fn revoke_permission(
+        env: Env,
+        admin: Address,
+        subject: Address,
+        permission: u32,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        Self::check_admin(&env, &admin)?;
+
+        if PermissionType::from_u32(permission).is_none() {
+            return Err(Error::InvalidPermission);
+        }
+
+        // Remove the grant flag
+        env.storage()
+            .instance()
+            .remove(&(PERMISSIONS, subject.clone(), permission));
+
+        // Append revocation to audit trail
+        let mut trail: Vec<PermissionAuditEntry> = env
+            .storage()
+            .instance()
+            .get(&(PERMISSIONS, subject.clone()))
+            .unwrap_or(Vec::new(&env));
+
+        trail.push_back(PermissionAuditEntry {
+            subject: subject.clone(),
+            permission: PermissionType::from_u32(permission).unwrap(),
+            granted: false,
+            changed_by: admin.clone(),
+            timestamp: env.ledger().timestamp(),
+        });
+        env.storage()
+            .instance()
+            .set(&(PERMISSIONS, subject.clone()), &trail);
+
+        events::emit_permission_revoked(&env, &subject, permission, &admin);
+        Ok(())
+    }
+
+    /// Check whether `subject` currently holds the given `permission`.
+    ///
+    /// Returns `true` if granted, `false` otherwise.
+    ///
+    /// # Errors
+    /// - [`Error::InvalidPermission`] if `permission` is not a valid [`PermissionType`] value.
+    pub fn has_permission(
+        env: Env,
+        subject: Address,
+        permission: u32,
+    ) -> Result<bool, Error> {
+        if PermissionType::from_u32(permission).is_none() {
+            return Err(Error::InvalidPermission);
+        }
+
+        let granted: bool = env
+            .storage()
+            .instance()
+            .get(&(PERMISSIONS, subject, permission))
+            .unwrap_or(false);
+        Ok(granted)
+    }
+
+    /// Get the full permission audit trail for a subject.
+    pub fn get_permission_audit(env: Env, subject: Address) -> Vec<PermissionAuditEntry> {
+        env.storage()
+            .instance()
+            .get(&(PERMISSIONS, subject))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    // ========================================================================
+    // Issue #706: Automatic reconciliation
+    // ========================================================================
+
+    /// Reconcile discrepancies between a waste item's recorded weight and its
+    /// actual/verified weight.
+    ///
+    /// Reconciliation rules:
+    /// - The waste must exist, be active, and have a non-zero `verified_weight`.
+    /// - If `verified_weight == weight`, there is nothing to reconcile
+    ///   ([`Error::NoDiscrepancy`]).
+    /// - The absolute discrepancy must be ≤ 10 % of the original weight;
+    ///   larger deviations are rejected ([`Error::ReconciliationThresholdExceeded`]).
+    /// - The weight is adjusted to `verified_weight` and an audit record is stored.
+    /// - A `reconcil` event is emitted.
+    ///
+    /// Caller must be the contract admin or hold the `Auditor` permission.
+    ///
+    /// # Errors
+    /// - [`Error::WasteNotFound`] if no waste exists for `waste_id`.
+    /// - [`Error::WasteDeactivated`] if the waste is already deactivated.
+    /// - [`Error::Unauthorized`] if caller lacks admin or Auditor permission.
+    /// - [`Error::NoDiscrepancy`] if recorded weight equals verified weight.
+    /// - [`Error::ReconciliationThresholdExceeded`] if discrepancy > 10 %.
+    pub fn reconcile_waste(
+        env: Env,
+        waste_id: u128,
+        verified_weight: u128,
+        reconciler: Address,
+        reason: String,
+    ) -> Result<ReconciliationRecord, Error> {
+        reconciler.require_auth();
+        Self::require_not_paused(&env);
+
+        // Caller must be admin OR have Auditor permission
+        let is_admin = env
+            .storage()
+            .instance()
+            .get::<_, Vec<Address>>(&ADMINS)
+            .map(|admins| admins.contains(&reconciler))
+            .unwrap_or(false);
+
+        let has_auditor: bool = env
+            .storage()
+            .instance()
+            .get(&(PERMISSIONS, reconciler.clone(), 1u32))
+            .unwrap_or(false);
+
+        if !is_admin && !has_auditor {
+            return Err(Error::Unauthorized);
+        }
+
+        // Load waste
+        let mut waste: Waste = env
+            .storage()
+            .instance()
+            .get(&("waste_v2", waste_id))
+            .ok_or(Error::WasteNotFound)?;
+
+        if !waste.is_active {
+            return Err(Error::WasteDeactivated);
+        }
+
+        let original_weight = waste.weight;
+
+        // Nothing to reconcile
+        if original_weight == verified_weight {
+            return Err(Error::NoDiscrepancy);
+        }
+
+        // Threshold check: discrepancy must be ≤ 10 % of original
+        let diff = if verified_weight > original_weight {
+            verified_weight - original_weight
+        } else {
+            original_weight - verified_weight
+        };
+
+        // diff / original_weight > 0.10  ⟺  diff * 10 > original_weight
+        if diff.checked_mul(10).ok_or(Error::Overflow)? > original_weight {
+            return Err(Error::ReconciliationThresholdExceeded);
+        }
+
+        // Apply adjustment
+        waste.weight = verified_weight;
+        env.storage()
+            .instance()
+            .set(&("waste_v2", waste_id), &waste);
+
+        let record = ReconciliationRecord {
+            waste_id,
+            original_weight,
+            reported_weight: verified_weight,
+            adjusted_weight: verified_weight,
+            reconciled_by: reconciler.clone(),
+            timestamp: env.ledger().timestamp(),
+            reason,
+        };
+
+        // Append to audit log
+        let mut log: Vec<ReconciliationRecord> = env
+            .storage()
+            .instance()
+            .get(&(RECONCIL_LOG, waste_id))
+            .unwrap_or(Vec::new(&env));
+        log.push_back(record.clone());
+        env.storage()
+            .instance()
+            .set(&(RECONCIL_LOG, waste_id), &log);
+
+        events::emit_waste_reconciled(
+            &env,
+            waste_id,
+            original_weight,
+            verified_weight,
+            &reconciler,
+        );
+
+        Ok(record)
+    }
+
+    /// Retrieve the reconciliation audit log for a waste item.
+    pub fn get_reconciliation_log(env: Env, waste_id: u128) -> Vec<ReconciliationRecord> {
+        env.storage()
+            .instance()
+            .get(&(RECONCIL_LOG, waste_id))
+            .unwrap_or(Vec::new(&env))
     }
 }

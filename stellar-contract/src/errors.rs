@@ -234,4 +234,24 @@ pub enum Error {
     /// (50) Waste is frozen (e.g. has an open dispute) and cannot be transferred.
     /// Returned by: `transfer_waste_v2`
     WasteFrozen = 50,
+
+    // ── RBAC errors (#704) ────────────────────────────────────────────────────
+
+    /// (51) The caller does not have the required permission for this operation.
+    /// Returned by: any permission-guarded function
+    PermissionDenied = 51,
+
+    /// (52) The permission type provided is not valid.
+    /// Returned by: `grant_permission`, `revoke_permission`
+    InvalidPermission = 52,
+
+    // ── Reconciliation errors (#706) ─────────────────────────────────────────
+
+    /// (53) The waste item has no weight discrepancy to reconcile.
+    /// Returned by: `reconcile_waste`
+    NoDiscrepancy = 53,
+
+    /// (54) The reconciliation adjustment exceeds the allowed threshold.
+    /// Returned by: `reconcile_waste`
+    ReconciliationThresholdExceeded = 54,
 }

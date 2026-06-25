@@ -1,0 +1,183 @@
+name: Mutation Testing
+
+on:
+  # Run on PRs and pushes to main to measure test quality
+  push:
+    branches: [main, develop]
+    paths:
+      - 'stellar-contract/src/**'
+      - 'stellar-contract/tests/**'
+      - 'stellar-contract/Cargo.toml'
+      - '.cargo/mutants.toml'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'stellar-contract/src/**'
+      - 'stellar-contract/tests/**'
+      - 'stellar-contract/Cargo.toml'
+      - '.cargo/mutants.toml'
+  # Allow manual runs to generate on-demand reports
+  workflow_dispatch:
+    inputs:
+      package:
+        description: 'Cargo package to mutate'
+        required: false
+        default: 'stellar-scavngr-contract'
+      minimum_score:
+        description: 'Minimum mutation score (0-100)'
+        required: false
+        default: '80'
+
+env:
+  CARGO_TERM_COLOR: always
+  # Minimum acceptable mutation score (percentage of mutants caught by tests)
+  MINIMUM_MUTATION_SCORE: ${{ github.event.inputs.minimum_score || '80' }}
+
+jobs:
+  mutation-tests:
+    name: Mutation Testing
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # Restore the full Cargo registry cache to speed up compilation of mutants
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            stellar-contract/target/
+          key: ${{ runner.os }}-mutants-${{ hashFiles('stellar-contract/Cargo.lock', 'Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mutants-
+
+      - name: Install cargo-mutants
+        run: |
+          cargo install cargo-mutants --locked
+
+      # Run mutation tests and capture the exit code.
+      # cargo-mutants exits 0 when all mutants are caught,
+      # 2 when missed mutants exist (we handle this ourselves), and
+      # 1 on a hard error.
+      - name: Run mutation tests
+        id: mutants
+        working-directory: stellar-contract
+        run: |
+          cargo mutants \
+            --package stellar-scavngr-contract \
+            --output ../mutants.out \
+            --jobs 4 \
+            -- --features testutils 2>&1 | tee ../mutation-results.txt
+          echo "exit_code=$?" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Parse mutation score
+        id: score
+        run: |
+          # Extract totals from the summary line produced by cargo-mutants:
+          # e.g. "45 mutants tested: 40 caught, 3 missed, 2 timeout"
+          SUMMARY=$(grep -E "mutants tested:" mutation-results.txt | tail -1 || echo "")
+          echo "Summary: $SUMMARY"
+
+          TOTAL=$(echo "$SUMMARY" | grep -oP '\d+ mutants' | grep -oP '\d+' || echo "0")
+          CAUGHT=$(echo "$SUMMARY" | grep -oP '\d+ caught' | grep -oP '\d+' || echo "0")
+          MISSED=$(echo "$SUMMARY" | grep -oP '\d+ missed' | grep -oP '\d+' || echo "0")
+          TIMEOUT=$(echo "$SUMMARY" | grep -oP '\d+ timeout' | grep -oP '\d+' || echo "0")
+
+          if [ "$TOTAL" -gt 0 ]; then
+            SCORE=$(( CAUGHT * 100 / TOTAL ))
+          else
+            SCORE=0
+          fi
+
+          echo "total=$TOTAL"    >> $GITHUB_OUTPUT
+          echo "caught=$CAUGHT"  >> $GITHUB_OUTPUT
+          echo "missed=$MISSED"  >> $GITHUB_OUTPUT
+          echo "timeout=$TIMEOUT" >> $GITHUB_OUTPUT
+          echo "score=$SCORE"    >> $GITHUB_OUTPUT
+
+          echo "### Mutation Score: ${SCORE}% (${CAUGHT}/${TOTAL} caught)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric  | Count |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Total   | $TOTAL   |" >> $GITHUB_STEP_SUMMARY
+          echo "| Caught  | $CAUGHT  |" >> $GITHUB_STEP_SUMMARY
+          echo "| Missed  | $MISSED  |" >> $GITHUB_STEP_SUMMARY
+          echo "| Timeout | $TIMEOUT |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Score** | **${SCORE}%** |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload mutation results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutation-results
+          path: |
+            mutation-results.txt
+            mutants.out/
+          retention-days: 30
+
+      - name: Enforce minimum mutation score
+        run: |
+          SCORE="${{ steps.score.outputs.score }}"
+          MIN="${{ env.MINIMUM_MUTATION_SCORE }}"
+          echo "Mutation score: ${SCORE}% (minimum: ${MIN}%)"
+          if [ -z "$SCORE" ] || [ "$SCORE" -lt "$MIN" ]; then
+            echo "::error::Mutation score ${SCORE}% is below the minimum threshold of ${MIN}%."
+            echo "::error::Review missed mutants in the uploaded artifact and add tests to cover them."
+            exit 1
+          fi
+          echo "✅ Mutation score ${SCORE}% meets the minimum threshold of ${MIN}%."
+
+  # Lightweight job that posts the mutation score as a PR comment
+  mutation-comment:
+    name: Post Mutation Score Comment
+    runs-on: ubuntu-latest
+    needs: mutation-tests
+    if: github.event_name == 'pull_request' && always()
+    permissions:
+      pull-requests: write
+
+    steps:
+      - name: Comment on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const score   = '${{ needs.mutation-tests.outputs.score   || 'N/A' }}';
+            const caught  = '${{ needs.mutation-tests.outputs.caught  || '?' }}';
+            const missed  = '${{ needs.mutation-tests.outputs.missed  || '?' }}';
+            const total   = '${{ needs.mutation-tests.outputs.total   || '?' }}';
+            const min     = '${{ env.MINIMUM_MUTATION_SCORE }}';
+            const passed  = parseInt(score) >= parseInt(min);
+            const icon    = passed ? '✅' : '❌';
+
+            const body = [
+              `## ${icon} Mutation Testing Results`,
+              '',
+              `| Metric | Value |`,
+              `|--------|-------|`,
+              `| Mutation Score | **${score}%** |`,
+              `| Mutants Caught | ${caught} / ${total} |`,
+              `| Missed Mutants | ${missed} |`,
+              `| Minimum Threshold | ${min}% |`,
+              '',
+              passed
+                ? `Mutation score meets the **${min}% minimum threshold**. 🎉`
+                : `⚠️ Score is below the **${min}% minimum**. Check the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for missed mutants.`,
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });

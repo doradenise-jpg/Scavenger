@@ -361,10 +361,39 @@ pub fn emit_custom_query_executed(env: &Env, query_id: u64) {
         .publish((symbol_short!("qry_exe"), query_id), ());
 }
 
-/// Emit event when a waste batch is processed
-pub fn emit_batch_processed(env: &Env, batch_id: u64, processor: &Address, note: &String) {
+// ============ RBAC Events (#704) ============
+
+pub fn emit_permission_granted(
+    env: &Env,
+    subject: &Address,
+    permission: u32,
+    granted_by: &Address,
+) {
+    env.events()
+        .publish((symbol_short!("perm_gr"), subject), (permission, granted_by));
+}
+
+pub fn emit_permission_revoked(
+    env: &Env,
+    subject: &Address,
+    permission: u32,
+    revoked_by: &Address,
+) {
+    env.events()
+        .publish((symbol_short!("perm_rv"), subject), (permission, revoked_by));
+}
+
+// ============ Reconciliation Events (#706) ============
+
+pub fn emit_waste_reconciled(
+    env: &Env,
+    waste_id: u128,
+    original_weight: u128,
+    adjusted_weight: u128,
+    reconciled_by: &Address,
+) {
     env.events().publish(
-        (symbol_short!("batch_proc"), batch_id),
-        (processor, note),
+        (symbol_short!("reconcil"), waste_id),
+        (original_weight, adjusted_weight, reconciled_by),
     );
 }

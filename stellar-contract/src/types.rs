@@ -2598,3 +2598,70 @@ impl WasteCertification {
         self.expires_at == 0 || current_time < self.expires_at
     }
 }
+
+// ============ RBAC Types (#704) ============
+
+/// Granular permission types for contract functions.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PermissionType {
+    /// Can verify and grade waste
+    Verifier = 0,
+    /// Can read audit logs and access reports
+    Auditor = 1,
+    /// Can manage participants and config (sub-admin)
+    Admin = 2,
+    /// Can create and update incentives on behalf of others
+    IncentiveManager = 3,
+}
+
+impl PermissionType {
+    /// Convert from u32, returning None for unknown variants.
+    pub fn from_u32(v: u32) -> Option<Self> {
+        match v {
+            0 => Some(PermissionType::Verifier),
+            1 => Some(PermissionType::Auditor),
+            2 => Some(PermissionType::Admin),
+            3 => Some(PermissionType::IncentiveManager),
+            _ => None,
+        }
+    }
+}
+
+/// A single entry in the permission audit trail.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PermissionAuditEntry {
+    /// Address whose permission changed
+    pub subject: Address,
+    /// The permission type
+    pub permission: PermissionType,
+    /// true = granted, false = revoked
+    pub granted: bool,
+    /// Who performed the change (admin)
+    pub changed_by: Address,
+    /// Ledger timestamp of the change
+    pub timestamp: u64,
+}
+
+// ============ Reconciliation Types (#706) ============
+
+/// Outcome of a waste reconciliation operation.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReconciliationRecord {
+    /// The waste item that was reconciled
+    pub waste_id: u128,
+    /// Original weight before reconciliation
+    pub original_weight: u128,
+    /// Reported (claimed) weight from submitter
+    pub reported_weight: u128,
+    /// Adjusted weight after reconciliation
+    pub adjusted_weight: u128,
+    /// Who triggered the reconciliation
+    pub reconciled_by: Address,
+    /// Timestamp of reconciliation
+    pub timestamp: u64,
+    /// Human-readable reason / rule applied
+    pub reason: String,
+}
