@@ -107,6 +107,12 @@ const ParticipantRegistrationPage = lazy(() =>
     default: m.ParticipantRegistrationPage
   }))
 )
+const TestReportsPage = lazy(() =>
+  import('@/pages/TestReportsPage').then((m) => ({ default: m.TestReportsPage }))
+)
+const ComplianceReportsPage = lazy(() =>
+  import('@/pages/ComplianceReportsPage').then((m) => ({ default: m.ComplianceReportsPage }))
+)
 
 // eslint-disable-next-line react-refresh/only-export-components
 function PageFallback() {
@@ -168,7 +174,9 @@ export const router = createBrowserRouter([
       { path: 'waste-statistics', element: <WasteStatisticsPage /> },
       { path: 'reward-tracking', element: <RewardTrackingPage /> },
       { path: 'verification-dashboard', element: <WasteVerificationDashboardPage /> },
-      { path: 'register', element: <ParticipantRegistrationPage /> }
+      { path: 'register', element: <ParticipantRegistrationPage /> },
+      { path: 'test-reports', element: <TestReportsPage /> },
+      { path: 'compliance-reports', element: <ComplianceReportsPage /> }
     ]
   },
   { path: '*', element: <NotFoundPage /> }
