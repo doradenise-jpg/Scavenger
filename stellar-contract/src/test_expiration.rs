@@ -396,3 +396,112 @@ fn test_waste_without_ttl_never_appears_in_expired_list() {
     let expired = client.get_expired_wastes();
     assert_eq!(expired.len(), 0);
 }
+
+// ─── Individual waste expiration check ──────────────────────────────────────
+
+#[test]
+fn test_check_waste_expiration_returns_true_for_expired_waste() {
+    let (env, client, admin) = setup_with_admin();
+    let recycler = register_recycler(&client, &env);
+
+    env.ledger().with_mut(|li| li.timestamp = 1_000);
+    client.set_waste_ttl(&admin, &WasteType::Plastic, &100);
+    let waste_id = client.recycle_waste(&WasteType::Plastic, &1_000u128, &recycler, &0, &0);
+
+    // Not yet expired
+    assert!(!client.check_waste_expiration(&waste_id));
+
+    // Advance past expiry
+    env.ledger().with_mut(|li| li.timestamp = 1_200);
+    assert!(client.check_waste_expiration(&waste_id));
+}
+
+#[test]
+fn test_check_waste_expiration_returns_false_for_nonexistent_waste() {
+    let (_env, client, _admin) = setup_with_admin();
+    assert!(!client.check_waste_expiration(&999_999u128));
+}
+
+#[test]
+fn test_check_waste_expiration_returns_false_for_inactive_waste() {
+    let (env, client, admin) = setup_with_admin();
+    let recycler = register_recycler(&client, &env);
+
+    env.ledger().with_mut(|li| li.timestamp = 1_000);
+    client.set_waste_ttl(&admin, &WasteType::Plastic, &100);
+    let waste_id = client.recycle_waste(&WasteType::Plastic, &1_000u128, &recycler, &0, &0);
+
+    // Deactivate waste
+    client.deactivate_waste(&waste_id);
+    env.ledger().with_mut(|li| li.timestamp = 1_200);
+    // Inactive wastes are not considered "expired" by the check
+    assert!(!client.check_waste_expiration(&waste_id));
+}
+
+// ─── Approaching expiry ─────────────────────────────────────────────────────
+
+#[test]
+fn test_get_wastes_approaching_expiry_returns_wastes_near_expiry() {
+    let (env, client, admin) = setup_with_admin();
+    let recycler = register_recycler(&client, &env);
+
+    env.ledger().with_mut(|li| li.timestamp = 1_000);
+    client.set_waste_ttl(&admin, &WasteType::Paper, &1_000);
+    let waste_id = client.recycle_waste(&WasteType::Paper, &1_000u128, &recycler, &0, &0);
+
+    // At ts 1500: expires_at = 2000 (1000 + 1000), remaining = 500
+    env.ledger().with_mut(|li| li.timestamp = 1_500);
+    let within_1000 = client.get_wastes_approaching_expiry(&1_000);
+    assert_eq!(within_1000.len(), 1);
+    assert_eq!(within_1000.get(0).unwrap(), waste_id);
+
+    // Within 100 seconds — not yet approaching
+    let within_100 = client.get_wastes_approaching_expiry(&100);
+    assert_eq!(within_100.len(), 0);
+}
+
+// ─── Lifecycle summary ──────────────────────────────────────────────────────
+
+#[test]
+fn test_lifecycle_summary_counts_active_and_inactive() {
+    let (env, client, admin) = setup_with_admin();
+    let recycler = register_recycler(&client, &env);
+
+    env.ledger().with_mut(|li| li.timestamp = 1_000);
+
+    // Waste 1: expires in 1000 seconds
+    client.set_waste_ttl(&admin, &WasteType::Paper, &1_000);
+    let _id1 = client.recycle_waste(&WasteType::Paper, &1_000u128, &recycler, &0, &0);
+
+    // Waste 2: no expiry
+    let _id2 = client.recycle_waste(&WasteType::Metal, &2_000u128, &recycler, &0, &0);
+
+    // Both active
+    let (active, inactive) = client.get_lifecycle_summary();
+    assert_eq!(active, 2);
+    assert_eq!(inactive, 0);
+
+    // Advance past expiry for waste 1
+    env.ledger().with_mut(|li| li.timestamp = 3_000);
+    let (active, inactive) = client.get_lifecycle_summary();
+    assert_eq!(active, 1);
+    assert_eq!(inactive, 1);
+}
+
+// ─── Global metrics includes expiration ─────────────────────────────────────
+
+#[test]
+fn test_get_metrics_has_expiration_and_grading_counts() {
+    let (env, client, admin) = setup_with_admin();
+    let recycler = register_recycler(&client, &env);
+
+    env.ledger().with_mut(|li| li.timestamp = 1_000);
+    client.set_waste_ttl(&admin, &WasteType::Paper, &500);
+    let _id1 = client.recycle_waste(&WasteType::Paper, &1_000u128, &recycler, &0, &0);
+    let _id2 = client.recycle_waste(&WasteType::Metal, &2_000u128, &recycler, &0, &0);
+
+    let metrics = client.get_metrics();
+    // 2 active wastes with expanded fields
+    assert_eq!(metrics.active_waste_count, 2);
+    assert_eq!(metrics.expired_waste_count, 0);
+}
