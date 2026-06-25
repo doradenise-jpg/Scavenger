@@ -11,6 +11,8 @@ const WASTE_TYPE_LABELS: Record<WasteType, string> = {
   [WasteType.Plastic]: 'Plastic',
   [WasteType.Metal]: 'Metal',
   [WasteType.Glass]: 'Glass',
+  [WasteType.Organic]: 'Organic',
+  [WasteType.Electronic]: 'Electronic',
 };
 
 export function ReviewStep({ formData }: ReviewStepProps) {
