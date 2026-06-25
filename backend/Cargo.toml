@@ -33,10 +33,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-actix-web = "0.7"
 futures = "0.3"
 printpdf = "0.7"
+actix-ws = "0.3"
+actix-web-actors = "4.2"
+rand = "0.8"
+hex = "0.4"
 
 [dev-dependencies]
 mockall = "0.12"
 tokio-test = "0.4"
+tempfile = "3"
 
 [[bin]]
 name = "scavenger-backend"

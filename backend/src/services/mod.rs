@@ -8,6 +8,7 @@ pub mod multichain;
 pub mod api;
 pub mod webhook;
 pub mod export;
+pub mod audit;
 
 pub use email::{EmailService, SendGridEmailService};
 pub use notifications::{NotificationService, FirebaseNotificationService};
@@ -19,3 +20,4 @@ pub use multichain::ChainAbstraction;
 pub use api::ApiBuilder;
 pub use webhook::{WebhookManager, WebhookEvent, Webhook};
 pub use export::{ExportService, ExportFormat, ExportData};
+pub use audit::{AuditService, AuditEntry, AuditEventType, AuditAction, AuditQuery};
